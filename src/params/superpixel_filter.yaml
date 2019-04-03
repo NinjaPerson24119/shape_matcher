@@ -1,0 +1,18 @@
+# gSLICr settings
+
+# Resolution to resize image to before processing
+gSLICr_width: 1920
+gSLICr_height: 1080
+
+# Segment into a certain number of parts or choose superpixel size, but not both
+gSLICr_noSegs: 399
+gSLICr_spixelSize: 16
+
+# Must be an integer
+gSLICr_sizeInsteadOfNumber: 0
+
+# Other
+gSLICr_cohWeight: 0.6
+gSLICr_noIters: 5
+gSLICr_doEnforceConnectivity: true
+

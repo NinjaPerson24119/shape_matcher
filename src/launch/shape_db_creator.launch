@@ -1,0 +1,10 @@
+<launch>
+    <arg name="model" default="" />
+    <node name="shape_db_creator" pkg="au_vision" type="shape_db_creator" output="screen" >
+      <param name="model" type="string" value="$(arg model)" />
+      <!-- Parameter Set -->
+  		<rosparam file="$(find au_vision)/params/path_detector.yaml" />
+  		<rosparam file="$(find au_vision)/params/superpixel_filter.yaml" />
+      <rosparam file="$(find au_vision)/params/shape_db_creator.yaml" />
+    </node>
+</launch>

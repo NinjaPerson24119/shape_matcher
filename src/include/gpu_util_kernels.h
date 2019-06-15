@@ -1,7 +1,3 @@
-/**
- * @author Nicholas Wengel
- */ 
-
 #ifdef GPU
 
 #ifndef AU_VISION_GPU_UTIL_KERNELS_H
@@ -10,6 +6,11 @@
 #include <ros/ros.h>
 #include <opencv2/core/cuda.hpp>
 #include <opencv2/opencv.hpp>
+
+#define GL_GLEXT_PROTOTYPES
+#include <GL/gl.h>
+#include <GL/glcorearb.h>
+#include <cuda_gl_interop.h>
 
 #include <builtin_types.h>
 #include <cuda.h>
@@ -34,18 +35,24 @@ inline void gpuAssert(cudaError_t code, const char *file, int line,
 }
 
 // Since OpenCV does not presently have a GPU version of cv::inrange, we'll roll
-// our own  Kernel credits for inRange:
+// our own Kernel. credits for inRange:
 // https://github.com/opencv/opencv/issues/6295
 extern "C" void callInRange_device(const cv::cuda::GpuMat &src,
                                    const cv::Scalar &lowerb,
                                    const cv::Scalar &upperb,
-                                   cv::cuda::GpuMat &dst);
+                                   cv::cuda::GpuMat &dst, cudaStream_t stream);
 
-// Sets a binary mask at the edges of spixels
+// Sets a binary mask outside the edges of spixels
 extern "C" void callSimpleEdgeDetect_device(unsigned short *grayMask,
                                             unsigned char *binaryMask, int rows,
                                             int cols);
-}
+
+// Builds the autofilter's mask
+extern "C" void callBuildMask_device(unsigned short *dstMask,
+                                     unsigned short *valueMap,
+                                     unsigned char *imageLab, int size);
+
+}  // namespace au_vision
 
 #endif
 

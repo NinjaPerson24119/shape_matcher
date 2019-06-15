@@ -1,9 +1,9 @@
 
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.10.2)
 project(au_vision)
 
-#Enable C++11
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 #Optimize or add debug symbols
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
@@ -12,6 +12,13 @@ else()
   add_definitions(-g)
 endif()
 
+# Define path of darknet folder here.
+find_path(DARKNET_PATH
+	NAMES "README.md"
+	HINTS "${CMAKE_CURRENT_SOURCE_DIR}/darknet/")
+message(STATUS "Darknet path dir = ${DARKNET_PATH}")
+
+
 # Define path of gSLICr folder here
 find_path(GSLICR_PATH
 	NAMES "README.md"
@@ -19,7 +26,7 @@ find_path(GSLICR_PATH
 message(STATUS "gSLICr path dir = ${GSLICR_PATH}")
 
 # Find CUDA
-find_package(CUDA 9 REQUIRED)
+find_package(CUDA 10)
 
 if (CUDA_FOUND)
   #Get CUDA compute capability
@@ -95,6 +102,15 @@ add_service_files(
   FILES DetectObjects.srv
 )
 
+add_action_files(
+  DIRECTORY action
+  FILES Detection.action
+)
+
+generate_dynamic_reconfigure_options(
+  cfg/QualificationFilter.cfg
+)
+
 generate_messages(
   DEPENDENCIES
   std_msgs
@@ -132,6 +148,55 @@ include_directories(
 #####################
 ##       GPU       ##
 #####################
+
+# file(GLOB ...) should not be used here as it prevents CMake from detecting changes,
+# and thus rebuilding, when any of the files are modified or removed
+set(DARKNET_SOURCE
+  ${DARKNET_PATH}/src/activation_layer.c
+  ${DARKNET_PATH}/src/activations.c
+  ${DARKNET_PATH}/src/avgpool_layer.c
+  ${DARKNET_PATH}/src/batchnorm_layer.c
+  ${DARKNET_PATH}/src/blas.c
+  ${DARKNET_PATH}/src/box.c
+  ${DARKNET_PATH}/src/col2im.c
+  ${DARKNET_PATH}/src/connected_layer.c
+  ${DARKNET_PATH}/src/convolutional_layer.c
+  ${DARKNET_PATH}/src/cost_layer.c
+  ${DARKNET_PATH}/src/crnn_layer.c
+  ${DARKNET_PATH}/src/crop_layer.c
+  ${DARKNET_PATH}/src/cuda.c
+  ${DARKNET_PATH}/src/data.c
+  ${DARKNET_PATH}/src/deconvolutional_layer.c
+  ${DARKNET_PATH}/src/demo.c
+  ${DARKNET_PATH}/src/detection_layer.c
+  ${DARKNET_PATH}/src/detector.c
+  ${DARKNET_PATH}/src/dropout_layer.c
+  ${DARKNET_PATH}/src/gemm.c
+  ${DARKNET_PATH}/src/gru_layer.c
+  ${DARKNET_PATH}/src/http_stream.cpp
+  ${DARKNET_PATH}/src/im2col.c
+  ${DARKNET_PATH}/src/image.c
+  ${DARKNET_PATH}/src/layer.c
+  ${DARKNET_PATH}/src/list.c
+  ${DARKNET_PATH}/src/local_layer.c
+  ${DARKNET_PATH}/src/matrix.c
+  ${DARKNET_PATH}/src/maxpool_layer.c
+  ${DARKNET_PATH}/src/network.c
+  ${DARKNET_PATH}/src/normalization_layer.c
+  ${DARKNET_PATH}/src/option_list.c
+  ${DARKNET_PATH}/src/parser.c
+  ${DARKNET_PATH}/src/region_layer.c
+  ${DARKNET_PATH}/src/reorg_layer.c
+  ${DARKNET_PATH}/src/reorg_old_layer.c
+  ${DARKNET_PATH}/src/rnn_layer.c
+  ${DARKNET_PATH}/src/route_layer.c
+  ${DARKNET_PATH}/src/shortcut_layer.c
+  ${DARKNET_PATH}/src/softmax_layer.c
+  ${DARKNET_PATH}/src/tree.c
+  ${DARKNET_PATH}/src/upsample_layer.c
+  ${DARKNET_PATH}/src/utils.c
+  ${DARKNET_PATH}/src/yolo_layer.c
+)
 
 if(${CUDA_SUCCESS})
 
@@ -194,6 +259,7 @@ if(${CUDA_SUCCESS})
       -D CUDA_ARCH_PTX=""
       -D CUDA_FAST_MATH=ON
       -D WITH_CUBLAS=ON
+      -D WITH_OPENGL=ON
       -D CUDA_NVCC_FLAGS="--expt-relaxed-constexpr"
       "${CMAKE_CURRENT_SOURCE_DIR}/opencv-${OPENCV_GPU_VERSION}"
       WORKING_DIRECTORY ${OPENCV_GPU_BUILD_DIR}
@@ -285,14 +351,10 @@ if(${CUDA_SUCCESS})
   ##    Shape Analysis   ##
   #########################
 
-  find_package(OpenGL REQUIRED)
-  include_directories(${OPENGL_INCLUDE_DIRS})
-
   cuda_add_library(shape_analysis
     src/shape_analysis/shape_analysis.cpp
     src/shape_analysis/shape_analysis_kernels.cu
     src/shape_analysis/shape_analysis_matcher.cpp
-    src/shape_analysis/contour_renderer.cpp
     src/shape_analysis/auto_filter.cpp
   )
 
@@ -303,7 +365,6 @@ if(${CUDA_SUCCESS})
   target_link_libraries(shape_analysis
     gSLICr_lib
     gpu_util
-    ${OPENGL_LIBRARIES}
     ${OpenCV_LIBRARIES}
     ${catkin_LIBRARIES}
   )
@@ -311,9 +372,11 @@ if(${CUDA_SUCCESS})
   #########################
   ##  Shape DB Creator   ##
   #########################
-
-  find_package(OpenSceneGraph REQUIRED osgDB osgUtil osgViewer osgGA)
+  find_package(OpenSceneGraph REQUIRED osgDB osgUtil osgViewer osgGA osg)
   include_directories(${OPENSCENEGRAPH_INCLUDE_DIRS})
+  
+  find_package(OpenGL REQUIRED)
+  include_directories(${OPENGL_INCLUDE_DIRS})
 
   add_executable(shape_db_creator src/shape_analysis/shape_db_creator.cpp)
 
@@ -324,9 +387,44 @@ if(${CUDA_SUCCESS})
   target_link_libraries(shape_db_creator
 	  gpu_util
     shape_analysis
+    ${OPENGL_LIBRARIES}
     ${OpenCV_LIBRARIES}
     ${OPENSCENEGRAPH_LIBRARIES}
     ${catkin_LIBRARIES}
+  )
+
+  #####################################
+  ##  Color Analysis / Qualification ##
+  #####################################
+
+  ## Create color_analysis library
+  add_library(color_analysis
+    src/color_analysis/color_analysis.cpp
+    src/color_analysis/qualification_gate_detector.cpp
+    src/color_analysis/qualification_post_detector.cpp
+    src/color_analysis/auto_filter_old.cpp
+  )
+
+  add_dependencies( color_analysis
+    au_core_generate_messages_cpp
+    ${PROJECT_NAME}_gencfg
+    ${PROJECT_NAME}_generate_messages_cpp
+  )
+
+  target_link_libraries(color_analysis
+    gpu_util
+    shape_analysis
+    ${catkin_LIBRARIES}
+  )
+
+  set(DETECTORS_LINK_LIBRARIES
+    ${DETECTORS_LINK_LIBRARIES}
+    color_analysis
+  )
+
+  set(DETECTOR_NODES_LINK_LIBRARIES
+    ${DETECTOR_NODES_LINK_LIBRARIES}
+    color_analysis
   )
 
   #####################
@@ -357,6 +455,67 @@ if(${CUDA_SUCCESS})
     ${DETECTOR_NODES_LINK_LIBRARIES}
     shape_detectors
   )
+  ###################
+  ## Yolo Detector ##
+  ###################
+
+  set(DARKNET_KERNELS
+    ${DARKNET_PATH}/src/activation_kernels.cu
+    ${DARKNET_PATH}/src/avgpool_layer_kernels.cu
+    ${DARKNET_PATH}/src/blas_kernels.cu
+    ${DARKNET_PATH}/src/col2im_kernels.cu
+    ${DARKNET_PATH}/src/convolutional_kernels.cu
+    ${DARKNET_PATH}/src/crop_layer_kernels.cu
+    ${DARKNET_PATH}/src/deconvolutional_kernels.cu
+    ${DARKNET_PATH}/src/dropout_layer_kernels.cu
+    ${DARKNET_PATH}/src/im2col_kernels.cu
+    ${DARKNET_PATH}/src/maxpool_layer_kernels.cu
+    ${DARKNET_PATH}/src/network_kernels.cu
+  )
+
+  include_directories(
+    ${DARKNET_PATH}/src
+    ${DARKNET_PATH}/include
+  )
+
+  add_library(darknet_util
+    src/yolo/darknet_util.cpp
+  )
+  # create yolo detector library
+  cuda_add_library(yolo_detector
+    src/detector.cpp
+    src/yolo/yolo_detector.cpp
+    ${DARKNET_SOURCE}
+    ${DARKNET_KERNELS}
+  )
+
+  add_dependencies(yolo_detector
+    ${PROJECT_NAME}_generate_messages_cpp
+    ${catkin_EXPORTED_TARGETS}
+  )
+
+  target_link_libraries(yolo_detector
+    m
+    pthread
+    stdc++
+    cuda
+    cudart
+    cublas
+    curand
+    darknet_util
+    yaml-cpp
+    ${Boost_LIBRARIES}
+    ${OpenCV_LIBRARIES}
+    ${catkin_LIBRARIES}
+  )
+
+  set(DETECTORS_LINK_LIBRARIES
+    ${DETECTORS_LINK_LIBRARIES}
+    yolo_detector
+  )
+else()
+  message(STATUS "gSLICr will not be built - CUDA was not found")
+  message(STATUS "Slope detector will not be built - CUDA was not found")
 
   #############################
   ##      OpenCV (NO GPU)    ##
@@ -366,5 +525,100 @@ if(${CUDA_SUCCESS})
   include_directories(
     ${OpenCV_INCLUDE_DIRS}
   )
-
 endif()
+
+#####################
+##   Vision Util   ##
+#####################
+
+## Create vision_util library
+add_library(vision_util
+  src/vision_bridge.cpp
+)
+add_dependencies(vision_util
+  ${catkin_EXPORTED_TARGETS}
+)
+target_link_libraries(vision_util
+  ${catkin_LIBRARIES}
+)
+
+#####################
+##    Detectors    ##
+#####################
+
+# create detector library
+add_library( detectors
+  src/detector.cpp
+  src/detector_factory.cpp
+)
+
+add_dependencies( detectors
+  ${PROJECT_NAME}_gencfg
+  ${PROJECT_NAME}_generate_messages_cpp
+  ${catkin_EXPORTED_TARGETS}
+)
+
+#Use indirection to allow for conditional libraries
+set(DETECTORS_LINK_LIBRARIES
+  ${DETECTORS_LINK_LIBRARIES}
+  vision_util
+  ${catkin_LIBRARIES}
+)
+
+target_link_libraries( detectors
+  ${DETECTORS_LINK_LIBRARIES}
+)
+
+###################
+## Ar_tag Detector ##
+###################
+add_executable(artag_detector src/artag_detector.cpp)
+add_dependencies(artag_detector
+  ${catkin_EXPORTED_TARGETS}
+)
+target_link_libraries(artag_detector
+  ${catkin_LIBRARIES}
+)
+
+####################
+## Detector Nodes ##
+####################
+
+#Avoid repetition and use indirection to allow for conditional libraries
+set(DETECTOR_NODES_LINK_LIBRARIES
+  ${DETECTOR_NODES_LINK_LIBRARIES}
+  detectors
+  ${catkin_LIBRARIES}
+)
+
+## Create Detector Handler
+add_executable( detector_handler
+  src/detector_handler/detector_handler.cpp
+  src/detector_handler/detector_manager.cpp
+  src/detector_handler/detector_handler_node.cpp
+)
+set_target_properties(detector_handler
+        PROPERTIES COMPILE_FLAGS "-std=c++14")
+add_dependencies( detector_handler
+  std_msgs_generate_messages_cpp
+  actionlib_msgs_generate_messages_cpp
+  au_core_generate_messages_cpp
+  ${PROJECT_NAME}_generate_messages_cpp
+  ${catkin_EXPORTED_TARGETS}
+)
+target_link_libraries( detector_handler
+  ${DETECTOR_NODES_LINK_LIBRARIES}
+)
+
+#########################
+##     Mock Camera     ##
+#########################
+
+add_executable(mock_camera src/mock_camera.cpp)
+add_dependencies(mock_camera
+  ${catkin_EXPORTED_TARGETS}
+)
+target_link_libraries(mock_camera
+  ${OpenCV_LIBRARIES}
+  ${catkin_LIBRARIES}
+)

@@ -50,3 +50,8 @@ void gSLICr::engines::core_engine::Write_Seg_Res_To_PGM(const char* fileName)
 	f.close();
 }
 
+const SpixelMap * gSLICr::engines::core_engine::Get_Spixel_Map()
+{
+	return slic_seg_engine->Get_Spixel_Map();
+}
+

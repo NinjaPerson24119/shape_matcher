@@ -1,7 +1,3 @@
-/**
- * @author Nicholas Wengel
- */ 
-
 #include <au_vision/shape_analysis/auto_filter.h>
 #include <au_vision/shape_analysis/shape_analysis.h>
 #include <limits>
@@ -65,8 +61,10 @@ void maskFromAutoFilter(const cv::Mat& imageLab,
   // Build histogram
   cv::Mat hist(uniformBins, uniformBins, CV_32SC1, cv::Scalar(0));
   int squareSize = 255 / uniformBins;
+  ROS_ASSERT(255 % uniformBins == 0);
   for (auto c : colorsIn) {
-    hist.at<int>(c[1] / squareSize, c[2] / squareSize) += 1;
+    hist.ptr<int>(static_cast<int>(c[1]) /
+                  squareSize)[static_cast<int>(c[2]) / squareSize] += 1;
   }
 
   // Get debug image
@@ -75,21 +73,21 @@ void maskFromAutoFilter(const cv::Mat& imageLab,
   }
 
   // Search for clusters of non-zero histogram values
-  std::list<std::list<cv::Point>> clusters;
+  std::vector<std::vector<cv::Point>> clusters;
   clusters = findClusters<int>(hist, 0);
 
   // Build value mapper (for mask creation in single pass)
   // Add two to make space for black and white
   int thisValue = 0;
-  std::vector<std::vector<unsigned short>> valueMap(
-      255, std::vector<unsigned short>(255, 0));
+  unsigned short* valueMap = new unsigned short[255 * 255];
+  memset(valueMap, 0, 255 * 255 * sizeof(unsigned short));
   for (auto cluster : clusters) {
     for (auto color : cluster) {
       for (int y = color.y * squareSize;
            y < (color.y + 1) * squareSize && y < 255; ++y) {
         for (int x = color.x * squareSize;
              x < (color.x + 1) * squareSize && x < 255; ++x) {
-          valueMap[y][x] = thisValue;
+          valueMap[y * 255 + x] = thisValue;
         }
       }
     }
@@ -97,33 +95,62 @@ void maskFromAutoFilter(const cv::Mat& imageLab,
   }
 
   // Build mask
+  unsigned short* dev_valueMap;
+  unsigned short* dev_maskBytes;
+  unsigned char* dev_imageLab;
   cv::Mat mask(imageLab.rows, imageLab.cols, CV_16UC1);
-  for (int y = 0; y < mask.rows; ++y) {
-    for (int x = 0; x < mask.cols; ++x) {
-      cv::Vec3b thisPixel = imageLab.at<cv::Vec3b>(y, x);
-      mask.at<unsigned short>(y, x) = valueMap[thisPixel[1]][thisPixel[2]];
-    }
-  }
+  gpuErrorCheck(cudaMalloc(&dev_valueMap, 255 * 255 * sizeof(unsigned short)));
+  gpuErrorCheck(cudaMalloc(&dev_maskBytes,
+                           mask.rows * mask.cols * sizeof(unsigned short)));
+  gpuErrorCheck(cudaMalloc(&dev_imageLab, imageLab.rows * imageLab.cols * 3));
+  gpuErrorCheck(cudaMemcpy(dev_valueMap, valueMap,
+                           255 * 255 * sizeof(unsigned short),
+                           cudaMemcpyHostToDevice));
+  gpuErrorCheck(cudaMemcpy(dev_imageLab, imageLab.data,
+                           imageLab.rows * imageLab.cols * 3,
+                           cudaMemcpyHostToDevice));
+
+  callBuildMask_device(dev_maskBytes, dev_valueMap, dev_imageLab,
+                       mask.rows * mask.cols);
+
+  gpuErrorCheck(cudaMemcpy(mask.data, dev_maskBytes,
+                           mask.rows * mask.cols * sizeof(unsigned short),
+                           cudaMemcpyDeviceToHost));
+
+  delete[] valueMap;
+  gpuErrorCheck(cudaFree(dev_valueMap));
+  gpuErrorCheck(cudaFree(dev_maskBytes));
+  gpuErrorCheck(cudaFree(dev_imageLab));
 
   // Also use simple thresholding to get black and white
-  cv::cuda::GpuMat dev_colorMask(imageLab), dev_blackMask, dev_whiteMask;
+  cv::cuda::GpuMat dev_colorMask(imageLab), dev_blackMask, dev_whiteMask,
+      dev_mask(mask);
+  cudaStream_t stream;
+  gpuErrorCheck(cudaStreamCreate(&stream));
+
+  dev_blackMask.create(dev_colorMask.rows, dev_colorMask.cols, CV_8UC1);
+  dev_whiteMask.create(dev_colorMask.rows, dev_colorMask.cols, CV_8UC1);
+
   ColorRange black(cv::Scalar(0, 128, 128), blackMargin);
   ColorRange white(cv::Scalar(255, 128, 128), whiteMargin);
-  callInRange_device(dev_colorMask, black.lower, black.upper, dev_blackMask);
-  callInRange_device(dev_colorMask, white.lower, white.upper, dev_whiteMask);
-  cv::Mat whiteMask, blackMask;
-  dev_blackMask.download(blackMask);
-  dev_whiteMask.download(whiteMask);
+
+  callInRange_device(dev_colorMask, black.lower, black.upper, dev_blackMask,
+                     stream);
+  callInRange_device(dev_colorMask, white.lower, white.upper, dev_whiteMask,
+                     stream);
+
+  gpuErrorCheck(cudaStreamSynchronize(stream));
+  gpuErrorCheck(cudaGetLastError());  // Verify that all went OK
+  gpuErrorCheck(cudaStreamDestroy(stream));
 
   // Add black and white to auto filter mask
-  mask.setTo(thisValue, blackMask);
-  mask.setTo(thisValue + 1, whiteMask);
-  cv::Mat shadeMask(blackMask.rows, blackMask.cols, CV_8UC1,
-                    cv::Scalar(128, 128, 128));
-  shadeMask.setTo(0, blackMask);
-  shadeMask.setTo(255, whiteMask);
+  cv::cuda::Stream cvStream;
+  dev_mask.setTo(thisValue, dev_blackMask, cvStream);
+  dev_mask.setTo(thisValue + 1, dev_whiteMask, cvStream);
+  cvStream.waitForCompletion();
 
   // Output
+  dev_mask.download(mask);
   int scaledValueStep = std::numeric_limits<unsigned short>::max() / thisValue;
   maskOut = mask * scaledValueStep;
 }

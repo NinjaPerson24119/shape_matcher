@@ -44,6 +44,11 @@ namespace gSLICr
 				return idx_img;
 			};
 
+			const SpixelMap* Get_Spixel_Map() const {
+				spixel_map->UpdateHostFromDevice();
+				return spixel_map;
+			}
+
 			void Perform_Segmentation(UChar4Image* in_img);
 			virtual void Draw_Segmentation_Result(UChar4Image* out_img){};
 		};

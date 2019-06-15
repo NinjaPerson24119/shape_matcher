@@ -1,19 +1,19 @@
-roulette_detector:
-  database: roulette.sa
+torpedo_square_detector:
+  database: torpedo_square.sa
 
-  min_points: 0
-  max_points: 0
-  minimum_contour_area: 15000
-  contour_linearization_epsilon: 9.0
+  min_points: 4
+  max_points: 4
+  minimum_contour_area: 10000
+  contour_linearization_epsilon: 8.0
 
-  area_difference_thresh: 200000
+  area_difference_thresh: 300000
 
   color_difference_thresh: 1000 # disable color culling
   morphology_filter_size: 23
 
-  minimum_rating: 0.2
+  minimum_rating: 0.50
 
-  minimum_shape_group_ratio: 0.2
+  minimum_shape_group_ratio: 1
 
   auto_filter_bins: 85
   auto_filter_black_margin: 30
@@ -25,7 +25,7 @@ roulette_detector:
   gSLICr_width: 1920
   gSLICr_height: 1080
 
-  gSLICr_noSegs: 100
+  gSLICr_noSegs: 399
   gSLICr_spixelSize: 16
 
   gSLICr_sizeInsteadOfNumber: 0
@@ -33,4 +33,5 @@ roulette_detector:
   gSLICr_cohWeight: 0.6
   gSLICr_noIters: 5
   gSLICr_doEnforceConnectivity: true
+
 

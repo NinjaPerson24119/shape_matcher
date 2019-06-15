@@ -1,7 +1,3 @@
-/**
- * @author Nicholas Wengel
- */ 
-
 #ifdef GPU
 
 #ifndef AU_VISION_SUPERPIXEL_FILTER_H
@@ -41,8 +37,8 @@ class SuperPixelFilter {
   // The dimension override variables provide a mechanism to programmatically
   // change the filter size. These values will override values in the config
   // file.
-  void initialize(ros::NodeHandle& handle, int overrideWidth = -1,
-                  int overrideHeight = -1);
+  void initialize(ros::NodeHandle& handle, std::string nsPrefix = "",
+                  int overrideWidth = -1, int overrideHeight = -1);
 
   // Used to check if the filter has been initialized
   bool isInitialized() const { return engine_ != nullptr; }
@@ -72,7 +68,11 @@ class SuperPixelFilter {
   // Returns a color image where each superpixel is colored with its average
   // color from the original image
   void resultAverageColorMask(cv::Mat& colorMaskOut,
-                              std::vector<cv::Scalar>& colorList);
+                              const std::vector<cv::Scalar>& inColorList);
+
+  // Returns a vector of the superpixel colors (the fourth channel indicates the
+  // source spixel's gray value)
+  void resultColors(std::vector<cv::Scalar>& colorList);
 
   // Takes in the image being processed and the region of interest message.
   // Adjusts roi if needed.

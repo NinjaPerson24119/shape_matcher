@@ -1,0 +1,164 @@
+# If adding a new shape matcher, remember to add its name to the detector list of the tracker_gui.
+# It's located at: /au_everything/catkin_ws/src/au_missioncontrol/src/tracker_gui.cpp
+#
+# Also remember to add the new_detector.yaml to the detector handler's launch file
+# Also remember to add the new detector's name to the detector factory
+
+# Namespace for this detector's parameters. This should be suffixed with "_detector"
+example_detector:
+  # The database file to load from "au_vision/shape_dbs/""
+  # String
+  database: example.sa
+
+  # The minimum and maximum number of points allowed for a contour to be matched.
+  # This can be used in conjunction with the "contour_linearization_epsilon" param to detect certain types of lines.
+  # For example, to detect a perfect rectangle, set the minimum and maximum to 4 and crank the linearization.
+  # Integer [0, infinity]
+  min_points: 0
+  max_points: 0
+  
+  # The minimum area a contour must have to be matched
+  #
+  # This should be set just above the size of contours found in image noise (water bubbles, dirt, etc.)
+  # to make a detector scale invariant this should be as small as possible.
+  #
+  # Otherwise distant instances of the target will be ignored
+  # Integer [0, infinity]
+  minimum_contour_area: 10000
+
+  # Due to image noise, contours are rarely a perfect fit.
+  # Some simple shapes will thus become complex as a result of redundant points.
+  # Increasing this will simplify contours such that arcs become straight lines.
+  # Double [0, infinity]
+  contour_linearization_epsilon: 3.0
+
+  # The maximal difference of area between a contour found in realtime
+  # versus a contour stored in the shape database for the realtime contour to
+  # be considered a match.
+  #
+  # A match rating is given relative to this value.
+  #
+  # For example, if this is 2000 and an area difference for a matched shape
+  # is 100 then its rating is 1 - 100/2000.
+  # Integer [0, infinity]
+  area_difference_thresh: 200000
+
+  # The maximal color difference between a contour found in realtime
+  # versus a contour stored in the shape database for the realtime contour
+  # to be considered a match.
+  #
+  # Color differences are done on the AB channels of the CIELAB gamut
+  # meaning there is a maximal difference of 255*2 = 510.
+  #
+  # Set This value above 510 to make a detector color invariant.
+  #
+  # Note that there is no setting to pick a target color. This is
+  # because target colors are pulled from the 3D models used during DB creation.
+  # Integer [0, infinity]
+  color_difference_thresh: 1000
+
+  # The size for the ellipse shaped morphology kernel
+  #
+  # The same kernel is used for erosion and dilation, meaning that average colors are sampled an equal distance from the contour for
+  # both interior and exterior average colors.
+  #
+  # This value must be odd.
+  # If it is too large, shapes with hollow centers (such as rings) will have their average color taken past their bounds.
+  # Intuitively, it's the thickness about a contour to take the average color.
+  # Integer [0, infinity]
+  morphology_filter_size: 23
+
+  # The minimum rating required for a shape to be a match.
+  # Recall that match ratings are calculated relative to the area_difference_threshold param.
+  # If a shape fails the area_difference_threshold then is will not be displayed on the debug_BinaryMaskWithHud topic.
+  # If a shape passes that threshold but has a rating less than minimum_rating, it will be drawn on the debug_BinaryMaskWithHud topic with a red contour.
+  # If a shape passes the minimum_rating param and is matched into a group of shapes it will be drawn green.
+  # If a shape passes the minimum_rating param but is not found to be part of a total group of shapes then is will be drawn blue.
+  # Double [0, 1]
+  minimum_rating: 0.50
+
+  # The minimum ratio realtime shapes found in a group versus how many should exist (and do in the DB)
+  #
+  # For example, if a roulette has 6 triangular wedges to match, it might be useful to require at least
+  # two wedges to prevent false positives. Then one should set this to 2/6.
+  # Double [0, 1]
+  minimum_shape_group_ratio: 0
+
+  # The number of bins on the x,y axes of the auto_filter's 2D histogram
+  # Set this higher if the auto_filter is grouping colors that should be distinct
+  # Set this lower if the auto_filter is leaving objects segmented into subshapes of similar color (to group them).
+  # This param simply tells how much to partition the AB spectrums of the CIELAB gamut.
+  #
+  # This must be a divisor of 255 so that the color gamut is divided uniformly
+  # Those divisors are: 1, 3, 5, 15, 17, 51, 85
+  # Integer [0, infinity]
+  auto_filter_bins: 85
+
+  # The auto_filter does not consider lightness on its histogram so to bin black and white these special params are considered.
+  # Shapes whose L1 distance (per channel) is less than auto_filter_black_margin from (0,128,128) CIELAB are considered black.
+  # Shapes whose L2 distance (per channel) is less than auto_filter_white_margin from (255,128,128) CIELAB are considered white.
+  # Integer [0, infinity]
+  auto_filter_black_margin: 30
+  auto_filter_white_margin: 30
+
+  # Set this to true to enable the construction of the auto_filter's visual histogram.
+  # This is very computationally expensive so should typically be set to false.
+  # Boolean
+  auto_filter_histogram: false
+
+  # gSLICr settings
+
+  # Resolution to resize the image to before processing.
+  # Higher resolutions mean more processing time but better accuracy.
+  # Reducing resolution has diminishing returns on performance
+  # Integer [0, infinity]
+  gSLICr_width: 1920
+  gSLICr_height: 1080
+
+  # Segment into a certain number of parts or choose superpixel size, but not both.
+  # Which of these params is used depends on the gSLICr_sizeInsteadOfNumber param.
+  # These parameters affect the size of the grid that gSLICr uses to partition an image.
+  # The grid squares are either an estimate of gSLICr_spixelSize or of arbitrary size but of a count exactly equal to gSLICr_noSegs.
+  #
+  # gSLICr's job is to group areas of similar color well enough that the auto_filter can then group objects split into multiple superpixels.
+  # Therefore, reduce the segment number to allow larger contours to be found (or increase the spixelsize)
+  # Or, decrease the segment number to reduce false positives from large objects when searching for small ones.
+  #
+  # Unfortunately, these parameters do not easily allow for distance invariance so test for good values in practice.
+  # It is generally preferred to use gSLICr_noSegs since its setting range is smaller, otherwise one needs to calculate grid square areas.
+  # There is, however, no real difference, as the grid-type partitioning is used regardless.
+  # Higher segment counts doesn't seem to degrade performance.
+  # Integer [0, infinity]
+  gSLICr_noSegs: 200
+  gSLICr_spixelSize: 500000
+
+  # Set this to 0 to use the param gSLICr_noSegs
+  # Set this to 1 to use the param gSLICr_spixelSize
+  # Integer: 0 or 1
+  gSLICr_sizeInsteadOfNumber: 1
+
+  # When constructing superpixels, gSLICr looks the the squared L1 distance of a pixel to a potential superpixel center as well as its color.
+  #
+  # gSLICr_cohWeight is a multiplier of the squared L1 distance which is then combined with the other factors for a
+  # "theoretical" distance used to decide if a pixel is part of a superpixel. Note that this "theoretical" distance is
+  # square rooted before being used, so gSLICr_cohWeight isn't on a squared scale.
+  #
+  # Reduce this value to prefer color variance instead of pixel distance to center in superpixel construction.
+  # In general, the effect of this is not significant. Simply increase it if there is too much color variance in superpixels.
+  # Double [0, infinity]
+  gSLICr_cohWeight: 0.6
+
+  # This is how many times gSLICr updates the centers of superpixels before returning its result.
+  # Setting this higher will allow gSLICr to deform superpixels into less square-esque shapes.
+  # As a result, setting this higher might help fit particularly wavy contours, but also has a tendency to overfit to noise.
+  # Thus, set this only as high as necessary and prefer lower values.
+  # Accuracy returns on higher values have very quickly diminishing returns.
+  # Also, setting this higher significantly reduces performance.
+  # Integer [0, infinity]
+  gSLICr_noIters: 5
+
+  # This param enforces the grid structure of the superpixels. As well, if it is set to false, superpixels need not be connected. 
+  # In general, this should be true.
+  # Setting this to false means that superpixels need not form closed contours, which makes those superpixels unusable.
+  # Boolean
+  gSLICr_doEnforceConnectivity: true

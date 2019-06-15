@@ -1,0 +1,148 @@
+# If adding a new shape matcher, remember to add the new_creator_db.yaml to the shape_db_creator's launch file
+
+# Namespace for this detector's parameters. This should be suffixed with "_db_creator"
+example_db_creator:
+  # The name that will be tagged to ROIs matched with the generated DB
+  # String
+  Name: heart
+
+  # An arbitrary value representing the distance from the renderer and the object
+  # This is used for estimating distance
+  # Double [0, infinity]
+  RenderDistance: 10.0
+
+  # Partitions the FBO into squares of this size for rough area differences
+  SquareSize: 10
+
+  # See example_detector.yaml for a description
+  MorphologyFilterSize: 23
+
+  # The maximum framerate of the DB generator's renderer
+  # Set this to 0 to remove the framerate limit
+  # Integer [0, infinity]
+  Fps: 0
+
+  # Turns gSLICr on or off
+  # If gSLICr is off, the colors used for color difference thresholding will vary more
+  # Boolean
+  gSLICrOn: true
+
+  # Image noise should not be an issue during the DB generation process
+  # Increasing this will reduce arcs into lines, reducing DB size, but possibly reducing matching accuracy
+  # For best results, this should be similar to the setting used in the shape matcher
+  # Double [0, infinity]
+  ContourLinearizationEpsilon: 3.0
+
+  # Contours with area less than this are not added to the DB
+  # This is useful if a model has many small holes, for example
+  # Integer [0, infinity]
+  MinimumContourArea: 1500
+
+  # The clear color of the renderer
+  # Set this to a color not on the target model so that contours can be distinguished
+  # Integer [0, 255]
+  BackgroundR: 255
+  BackgroundG: 255
+  BackgroundB: 255
+
+  # Translation of the model
+  # Double [-infinity, infinity]
+  RelativeTranslateX: 0
+  RelativeTranslateY: 0
+  RelativeTranslateZ: 0
+
+  # The uniform scale factor of the model
+  # Increase this if the model is too small, or decrease it if the model clips the renderer's edges
+  # Double [0, infinity]
+  UniformScale: 1.0
+
+  # Pose of the model (in degrees)
+  # Integer [-infinity, infinity]
+  InitialRotX: 90
+  InitialRotY: 0
+  InitialRotZ: 0
+
+  # The angle intervals for which contours will be grabbed
+  # These are relative to the initial transforms
+  # These values may be negative
+  # Start and end values for each axis cannot be the same
+  # Integer [-infinity, infinity]
+  StartRotateX: -40
+  EndRotateX: 40
+  StartRotateY: -40
+  EndRotateY: 40
+  StartRotateZ: 0
+  EndRotateZ: 359
+
+  # The amount to partition the angle intervals by
+  # For example, if the x-axis is [-10, 10] and the rotate step is 10, contours will be grabbd at x-rotations of {-10, 0, 10}
+  # Integer [0, infinity]
+  RotateStep: 10
+
+  # Filters for grabbing contours
+  # Multiple filters are required in cases where the an object contains multiple shapes that are touching and all those shapes are desired for matching
+  # Filters cannot fully each other
+  # Filter color ranges are in the CIELAB gamut (see: http://colorizer.org/ for conversions)
+
+  # The number of filters. The shape DB creator reads this to parse the filters.
+  # If it is set greater than the number of filters written below an error will occur.
+  # Errors will not occur if it is set less than the number of filters written below (they will silently be ignored)
+  FilterCount: 1
+
+  # There are three filter types: range, include, exclude
+  # Range filters will only find contours in the passed range
+  #
+  # Include filters will only find contours in the passed color window. 
+  # The difference between it and the range filter is that the margin can be easily changed without recalculating the upper and lower
+  # bounds of the interval
+  #
+  # Exclude filters will find contours outside of the passed color window.
+  #
+  # Filters can be combined. For example, a range filter can be set, then an exclude filter will remove a chunk from the range filter, etc.
+  # Color values range in [0, 255]
+  # The CIELAB gamut is like so:
+  # L: 0 (black) <--> 255 (white) 
+  # A: 0 (green) <--> 255 (red)
+  # B: 0 (blue)  <--> 255 (yellow)
+  #
+  # The margin on include and exclude filters calculates the interval by adding and subtracting the interval from the (central/target)
+  # LAB value.
+  #
+  # Be sure to give each filter a different number (counting from 0)
+
+  Filter_0_Mode: range
+  Filter_0_LowerL: 0
+  Filter_0_LowerA: 138
+  Filter_0_LowerB: 138
+  Filter_0_UpperL: 255
+  Filter_0_UpperA: 255
+  Filter_0_UpperB: 255
+
+  Filter_1_Mode: include
+  Filter_1_L: 0
+  Filter_1_A: 0
+  Filter_1_B: 0
+  Filter_1_Margin: 0
+
+  Filter_2_Mode: exclude
+  Filter_2_L: 0
+  Filter_2_A: 0
+  Filter_2_B: 0
+  Filter_2_Margin: 0
+
+  # gSLICr settings (see example_detector.yaml for descriptions of these parameters)
+  
+  # Doubles as the frame buffer dimensions
+  # The frame buffer can be thought of as the viewport. Increasing its size allows for more accurate area differences during matching.
+  # However, it also increases memory usage and DB generation time.
+  gSLICr_width: 1920
+  gSLICr_height: 1080
+
+  gSLICr_noSegs: 399
+  gSLICr_spixelSize: 16
+
+  gSLICr_sizeInsteadOfNumber: 0
+
+  gSLICr_cohWeight: 0.6
+  gSLICr_noIters: 5
+  gSLICr_doEnforceConnectivity: true

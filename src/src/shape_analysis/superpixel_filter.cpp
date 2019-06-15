@@ -1,7 +1,3 @@
-/**
- * @author Nicholas Wengel
- */ 
-
 #include <au_vision/shape_analysis/superpixel_filter.h>
 
 #include <algorithm>
@@ -52,8 +48,8 @@ SuperPixelFilter::~SuperPixelFilter() {
 }
 
 // Initialization
-void SuperPixelFilter::initialize(ros::NodeHandle& handle, int overrideWidth,
-                                  int overrideHeight) {
+void SuperPixelFilter::initialize(ros::NodeHandle& handle, std::string nsPrefix,
+                                  int overrideWidth, int overrideHeight) {
   if (engine_) {
     engine_.reset(nullptr);
   }
@@ -73,42 +69,46 @@ void SuperPixelFilter::initialize(ros::NodeHandle& handle, int overrideWidth,
   gSLICr::objects::settings config;
 
   // This setting is mandatory
-  config.color_space = gSLICr::CIELAB;
+  // NOTE: do not set this to gSLICr::CIELAB as that will make gSLICr convert
+  // our already CIELAB image again into CIELAB By setting it to RGB, gSLICr
+  // just skips the conversion, which is ideal.
+  config.color_space = gSLICr::RGB;
 
   // Others...
-  if (!handle.getParam("gSLICr_width", config.img_size.x)) {
+  if (!handle.getParam(nsPrefix + "gSLICr_width", config.img_size.x)) {
     ROS_FATAL("SuperPixelFilter: could not get parameter 'gSCLIr_width'");
     ROS_BREAK();
   }
-  if (!handle.getParam("gSLICr_height", config.img_size.y)) {
+  if (!handle.getParam(nsPrefix + "gSLICr_height", config.img_size.y)) {
     ROS_FATAL("SuperPixelFilter: could not get parameter 'gSCLIr_height'");
     ROS_BREAK();
   }
-  if (!handle.getParam("gSLICr_noSegs", config.no_segs)) {
+  if (!handle.getParam(nsPrefix + "gSLICr_noSegs", config.no_segs)) {
     ROS_FATAL("SuperPixelFilter: could not get parameter 'gSLICr_noSegs'");
     ROS_BREAK();
   }
-  if (!handle.getParam("gSLICr_spixelSize", config.spixel_size)) {
+  if (!handle.getParam(nsPrefix + "gSLICr_spixelSize", config.spixel_size)) {
     ROS_FATAL("SuperPixelFilter: could not get parameter 'gSLICr_spixelSize'");
     ROS_BREAK();
   }
   int sizeInsteadOfNumber;
-  if (!handle.getParam("gSLICr_sizeInsteadOfNumber", sizeInsteadOfNumber)) {
+  if (!handle.getParam(nsPrefix + "gSLICr_sizeInsteadOfNumber",
+                       sizeInsteadOfNumber)) {
     ROS_FATAL(
         "SuperPixelFilter: could not get parameter "
         "'gSLICr_sizeInsteadOfNumber'");
     ROS_BREAK();
   }
   config.seg_method = static_cast<gSLICr::SEG_METHOD>(sizeInsteadOfNumber);
-  if (!handle.getParam("gSLICr_cohWeight", config.coh_weight)) {
+  if (!handle.getParam(nsPrefix + "gSLICr_cohWeight", config.coh_weight)) {
     ROS_FATAL("SuperPixelFilter: could not get parameter 'gSLICr_cohWeight'");
     ROS_BREAK();
   }
-  if (!handle.getParam("gSLICr_noIters", config.no_iters)) {
+  if (!handle.getParam(nsPrefix + "gSLICr_noIters", config.no_iters)) {
     ROS_FATAL("SuperPixelFilter: could not get parameter 'gSLICr_noIters'");
     ROS_BREAK();
   }
-  if (!handle.getParam("gSLICr_doEnforceConnectivity",
+  if (!handle.getParam(nsPrefix + "gSLICr_doEnforceConnectivity",
                        config.do_enforce_connectivity)) {
     ROS_FATAL(
         "SuperPixelFilter: could not get parameter "
@@ -161,18 +161,12 @@ void SuperPixelFilter::convertImage(const cv::Mat& inimg,
   gSLICr::Vector4u* outimg_ptr = outimg->GetData(MEMORYDEVICE_CPU);
   unsigned char* inimg_ptr = inimg.data;
 
-  // Copy OpenCV mat to device
-  gpuErrorCheck(cudaMemcpy(dev_openCvImageData_, inimg_ptr,
-                           openCvImageBufferBytes_, cudaMemcpyHostToDevice));
-
-  // Convert in kernel
-  callConvertImageOpenCvToVectors_device(
-      blocks_, threadsPerBlock_, dev_openCvImageData_, dev_colorImageData_,
-      outimg->noDims.y, outimg->noDims.x);
-
-  // Copy vector data back to host
-  gpuErrorCheck(cudaMemcpy(outimg_ptr, dev_colorImageData_,
-                           colorImageBufferBytes_, cudaMemcpyDeviceToHost));
+  // copy
+  for (int i = 0; i < inimg.rows * inimg.cols; ++i) {
+    outimg_ptr[i].r = inimg_ptr[i * 3 + 0];
+    outimg_ptr[i].g = inimg_ptr[i * 3 + 1];
+    outimg_ptr[i].b = inimg_ptr[i * 3 + 2];
+  }
 }
 
 // Converts from gSLICr image to OpenCV matrix
@@ -184,18 +178,12 @@ void SuperPixelFilter::convertImage(const gSLICr::UChar4Image* inimg,
   unsigned char* outimg_ptr = outimg.data;
   const gSLICr::Vector4u* inimg_ptr = inimg->GetData(MEMORYDEVICE_CPU);
 
-  // Copy vectors to device
-  gpuErrorCheck(cudaMemcpy(dev_colorImageData_, inimg_ptr,
-                           colorImageBufferBytes_, cudaMemcpyHostToDevice));
-
-  // Convert in kernel
-  callConvertImageVectorsToOpenCv_device(
-      blocks_, threadsPerBlock_, dev_colorImageData_, dev_openCvImageData_,
-      inimg->noDims.y, inimg->noDims.x);
-
-  // Copy OpenCV mat back to host
-  gpuErrorCheck(cudaMemcpy(outimg_ptr, dev_openCvImageData_,
-                           openCvImageBufferBytes_, cudaMemcpyDeviceToHost));
+  // copy
+  for (int i = 0; i < inimg->noDims.y * inimg->noDims.x; ++i) {
+    outimg_ptr[i * 3 + 0] = inimg_ptr[i].r;
+    outimg_ptr[i * 3 + 1] = inimg_ptr[i].g;
+    outimg_ptr[i * 3 + 2] = inimg_ptr[i].b;
+  }
 }
 
 // Overload for IntImage
@@ -205,6 +193,7 @@ int SuperPixelFilter::convertImage(const gSLICr::IntImage* inimg,
 
   // Read memory
   outimg = cv::Mat(inimg->noDims.y, inimg->noDims.x, CV_16UC1);
+  unsigned short* outimg_ptr = (unsigned short*)outimg.data;
   const int* inimg_ptr = inimg->GetData(MEMORYDEVICE_CPU);
 
   // Find maximum
@@ -221,13 +210,9 @@ int SuperPixelFilter::convertImage(const gSLICr::IntImage* inimg,
     ROS_BREAK();
   }
 
-  // Copy values to OpenCV type
-  for (int y = 0; y < inimg->noDims.y; y++) {
-    for (int x = 0; x < inimg->noDims.x; x++) {
-      int idx = x + y * inimg->noDims.x;
-      outimg.at<unsigned short>(y, x) =
-          static_cast<unsigned short>(inimg_ptr[idx]);
-    }
+  // copy
+  for (int i = 0; i < inimg->noDims.y * inimg->noDims.x; ++i) {
+    outimg_ptr[i] = inimg_ptr[i];
   }
 
   // Scale for contrast
@@ -308,7 +293,7 @@ void SuperPixelFilter::resultLineOverlay(cv::Mat& out) {
 }
 
 void SuperPixelFilter::resultAverageColorMask(
-    cv::Mat& colorMaskOut, std::vector<cv::Scalar>& colorList) {
+    cv::Mat& colorMaskOut, const std::vector<cv::Scalar>& inColorList) {
   ROS_ASSERT(initialFilterDone_);
 
   // Read memory for mask
@@ -373,23 +358,37 @@ void SuperPixelFilter::resultAverageColorMask(
                                           &colorTexDesc, nullptr));
   }
 
+  // for async CUDA
+  cudaStream_t stream;
+  gpuErrorCheck(cudaStreamCreate(&stream));
+
+  // copy color list to change format
+  // note that pixel colors must be ordered for the drawing kernel (third
+  // component is gray id)
+  auto sorted = inColorList;
+  std::sort(sorted.begin(), sorted.end(),
+            [](const cv::Scalar& a, const cv::Scalar& b) -> bool {
+              return a[3] < b[3];
+            });
+  ROS_ASSERT(sorted.size() >= spixels);
+  for (int i = 0; i < spixels; ++i) {
+    spixelBins_[i].x = sorted[i][0];
+    spixelBins_[i].y = sorted[i][1];
+    spixelBins_[i].z = sorted[i][2];
+  }
+
   // Copy the data
-  memset(spixelBins_.get(), 0, spixelBinsBytes);
   gSLICr::Vector4u* colorImageData = colorImage_->GetData(MEMORYDEVICE_CPU);
-  gpuErrorCheck(cudaMemcpy(dev_spixelBins_, spixelBins_.get(), spixelBinsBytes,
-                           cudaMemcpyHostToDevice));
-  gpuErrorCheck(cudaMemcpy(dev_grayImageData_, grayImageData,
-                           grayImageBufferBytes, cudaMemcpyHostToDevice));
-  gpuErrorCheck(cudaMemcpy(dev_colorImageData_, colorImageData,
-                           colorImageBufferBytes_, cudaMemcpyHostToDevice));
-
-  // Run color averaging kernel
-  callSumColorsToBins_device(blocks_, threadsPerBlock_, dev_spixelBins_,
-                             pixelCount, colorTex_, grayTex_);
-
-  // Run division kernel
-  callDivideColorsInBins_device(blocks_, threadsPerBlock_, dev_spixelBins_,
-                                spixels);
+  gpuErrorCheck(cudaMemcpyAsync(dev_spixelBins_, spixelBins_.get(),
+                                spixelBinsBytes, cudaMemcpyHostToDevice,
+                                stream));
+  gpuErrorCheck(cudaMemcpyAsync(dev_grayImageData_, grayImageData,
+                                grayImageBufferBytes, cudaMemcpyHostToDevice,
+                                stream));
+  gpuErrorCheck(cudaMemcpyAsync(dev_colorImageData_, colorImageData,
+                                colorImageBufferBytes_, cudaMemcpyHostToDevice,
+                                stream));
+  gpuErrorCheck(cudaStreamSynchronize(stream));
 
   // Run drawing kernel
   // Note that we don't need to copy anything to the device for this call since
@@ -398,22 +397,35 @@ void SuperPixelFilter::resultAverageColorMask(
   callDrawAverageColors_device(blocks_, threadsPerBlock_, dev_spixelBins_,
                                dev_openCvImageData_, colorImage_->noDims.y,
                                colorImage_->noDims.x, grayTex_);
-  gpuErrorCheck(cudaMemcpy(colorMask.data, dev_openCvImageData_,
-                           openCvImageBufferBytes_, cudaMemcpyDeviceToHost));
+  gpuErrorCheck(cudaMemcpyAsync(colorMask.data, dev_openCvImageData_,
+                                openCvImageBufferBytes_, cudaMemcpyDeviceToHost,
+                                stream));
 
-  // Get average colors
-  colorList.resize(spixels);
-  gpuErrorCheck(cudaMemcpy(spixelBins_.get(), dev_spixelBins_, spixelBinsBytes,
-                           cudaMemcpyDeviceToHost));
-  for (int i = 0; i < spixels; ++i) {
-    colorList[i][0] = spixelBins_[i].z;
-    colorList[i][1] = spixelBins_[i].y;
-    colorList[i][2] = spixelBins_[i].x;
-  }
+  gpuErrorCheck(cudaStreamSynchronize(stream));
+  gpuErrorCheck(cudaStreamDestroy(stream));
 
   // Return
   initialColorAverageDone_ = true;
   colorMaskOut = colorMask;
+}
+
+void SuperPixelFilter::resultColors(std::vector<cv::Scalar>& colorList) {
+  ROS_ASSERT(initialFilterDone_);
+
+  // fetch from gSLICr
+  const gSLICr::SpixelMap* map = engine_->Get_Spixel_Map();
+
+  // build list
+  std::vector<cv::Scalar> vec;
+  vec.reserve(map->noDims.x * map->noDims.y);
+  const gSLICr::objects::spixel_info* map_ptr = map->GetData(MEMORYDEVICE_CPU);
+  for (int i = 0; i < map->noDims.x * map->noDims.y; ++i) {
+    vec.push_back(cv::Scalar(map_ptr[i].color_info[0], map_ptr[i].color_info[1],
+                             map_ptr[i].color_info[2], map_ptr[i].id));
+  }
+
+  // return
+  colorList = vec;
 }
 
 // Adjusts the region of interest if the spfilter and image are different sizes

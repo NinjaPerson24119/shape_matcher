@@ -1,7 +1,3 @@
-/**
- * @author Nicholas Wengel
- */ 
-
 #ifdef GPU
 #ifndef AU_VISION_AUTO_FILTER
 #define AU_VISION_AUTO_FILTER
@@ -46,10 +42,10 @@ void maskFromAutoFilter(const cv::Mat& imageLab,
  *
  */
 template <class T>
-std::list<cv::Point> findAdjacentIndices(
+std::vector<cv::Point> findAdjacentIndices(
     const cv::Mat& Histogram, int x, int y, const T& ZeroValue,
-    const std::list<cv::Point>& IgnoreList) {
-  std::list<cv::Point> indicesOfAdjacents;
+    const std::vector<cv::Point>& IgnoreList) {
+  std::vector<cv::Point> indicesOfAdjacents;
   indicesOfAdjacents.push_back(cv::Point(x, y));
 
   // Add indices
@@ -113,18 +109,27 @@ std::list<cv::Point> findAdjacentIndices(
   }
 
   // Remove indices to be ignored
-  for (auto ignore : IgnoreList) {
-    std::list<cv::Point>::iterator indiceIter = indicesOfAdjacents.begin();
-    while (indiceIter != indicesOfAdjacents.end()) {
-      if (*indiceIter == ignore) {
-        indicesOfAdjacents.erase(indiceIter++);
-      } else {
-        ++indiceIter;
+  for (int i = 0; i < IgnoreList.size(); ++i) {
+    for (int j = 0; j < indicesOfAdjacents.size(); ++j) {
+      // if in ignore list then flag for deletion
+      if (indicesOfAdjacents[j] == IgnoreList[i]) {
+        // assign delete flag
+        indicesOfAdjacents[j].x = -1;
       }
     }
   }
 
-  return indicesOfAdjacents;
+  // Rebuild totalIndices
+  std::vector<cv::Point> newIndicesOfAdjacents;
+  newIndicesOfAdjacents.reserve(indicesOfAdjacents.size());
+  for (auto i : indicesOfAdjacents) {
+    // copy if not flagged
+    if (i.x != -1) {
+      newIndicesOfAdjacents.push_back(i);
+    }
+  }
+
+  return newIndicesOfAdjacents;
 }
 
 /**
@@ -147,39 +152,39 @@ std::list<cv::Point> findAdjacentIndices(
  *
  */
 template <class T>
-std::list<cv::Point> findAdjacentIndicesRecursive(
+std::vector<cv::Point> findAdjacentIndicesRecursive(
     const cv::Mat& Histogram, int x, int y, const T& ZeroValue,
-    const std::list<cv::Point>& IgnoreList) {
-  std::list<cv::Point> firstIgnore;
+    const std::vector<cv::Point>& IgnoreList) {
+  std::vector<cv::Point> firstIgnore;
   firstIgnore.push_back(cv::Point(x, y));
 
-  std::list<cv::Point> toSearch = findAdjacentIndices<T>(
-      Histogram, x, y, ZeroValue, firstIgnore);  // Initial search
-  std::list<cv::Point> totalIndices;  // Will also be used as ignore list
+  std::vector<cv::Point> totalIndices;  // Will also be used as ignore list
+  cv::Point thisPoint(x, y);
 
   // Add ignore indices
   if (Histogram.at<T>(y, x) > ZeroValue)  // Do not add 0 freq elements
   {
-    totalIndices.push_back(cv::Point(x, y));  // Do not forget original indice
+    totalIndices.push_back(thisPoint);  // Do not forget original indice
+  } else {
+    // don't start searches from zero squares
+    return std::vector<cv::Point>();
   }
 
+  std::vector<cv::Point> toSearch = findAdjacentIndices<T>(
+      Histogram, x, y, ZeroValue, firstIgnore);  // Initial search
   for (auto i : toSearch) {
     totalIndices.push_back(i);
   }
 
   // Keep searching until all surrounding elements d.n.e. or are 0
   while (toSearch.size() != 0) {
-    // Get the last of the total indices that was will be searched
-    std::list<cv::Point>::iterator lastSearched;
-    for (lastSearched = totalIndices.begin();
-         std::next(lastSearched) != totalIndices.end(); ++lastSearched) {
-    }
+    // Get the last of the total indices that was be searched
+    int nextSearch = totalIndices.size();
 
     // Search
-    for (std::list<cv::Point>::iterator s = toSearch.begin();
-         s != toSearch.end(); ++s) {
-      std::list<cv::Point> newSearch = findAdjacentIndices<T>(
-          Histogram, s->x, s->y, ZeroValue, totalIndices);
+    for (int k = 0; k < toSearch.size(); ++k) {
+      std::vector<cv::Point> newSearch = findAdjacentIndices<T>(
+          Histogram, toSearch[k].x, toSearch[k].y, ZeroValue, totalIndices);
 
       // Add new elements to total list
       for (auto i : newSearch) {
@@ -191,23 +196,33 @@ std::list<cv::Point> findAdjacentIndicesRecursive(
     toSearch.clear();
 
     // Add new elements to be searched
-    for (++lastSearched; lastSearched != totalIndices.end(); ++lastSearched) {
-      toSearch.push_back(*lastSearched);
+    for (int i = nextSearch; i < totalIndices.size(); ++i) {
+      toSearch.push_back(totalIndices[i]);
     }
   }
 
   // Remove indices to be ignored
-  for (auto ignore : IgnoreList) {
-    std::list<cv::Point>::iterator indiceIter = totalIndices.begin();
-    while (indiceIter != totalIndices.end()) {
-      if (*indiceIter == ignore) {
-        totalIndices.erase(indiceIter++);
-      } else {
-        ++indiceIter;
+  for (int i = 0; i < IgnoreList.size(); ++i) {
+    for (int j = 0; j < totalIndices.size(); ++j) {
+      // if in ignore list then flag for deletion
+      if (totalIndices[j] == IgnoreList[i]) {
+        // assign delete flag
+        totalIndices[j].x = -1;
       }
     }
   }
-  return totalIndices;
+
+  // Rebuild totalIndices
+  std::vector<cv::Point> newTotalIndices;
+  newTotalIndices.reserve(totalIndices.size());
+  for (auto i : totalIndices) {
+    // copy if not flagged
+    if (i.x != -1) {
+      newTotalIndices.push_back(i);
+    }
+  }
+
+  return newTotalIndices;
 }
 
 /**
@@ -222,14 +237,14 @@ std::list<cv::Point> findAdjacentIndicesRecursive(
  *
  */
 template <class T>
-std::list<std::list<cv::Point> > findClusters(const cv::Mat& Histogram,
-                                              const T& ZeroValue) {
-  std::list<cv::Point> knownIndices;
-  std::list<std::list<cv::Point> > clusters;
+std::vector<std::vector<cv::Point> > findClusters(const cv::Mat& Histogram,
+                                                  const T& ZeroValue) {
+  std::vector<cv::Point> knownIndices;
+  std::vector<std::vector<cv::Point> > clusters;
   for (int y = 0; y < Histogram.rows; ++y) {
     for (int x = 0; x < Histogram.cols; ++x) {
       // Look for cluster that does not have known indices
-      std::list<cv::Point> temp = findAdjacentIndicesRecursive<int>(
+      std::vector<cv::Point> temp = findAdjacentIndicesRecursive<int>(
           Histogram, x, y, ZeroValue, knownIndices);
 
       if (temp.size() > 0) {

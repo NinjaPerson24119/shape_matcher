@@ -1,10 +1,14 @@
 <launch>
-    <arg name="model" default="" />
-    <node name="shape_db_creator" pkg="au_vision" type="shape_db_creator" output="screen" >
+    <arg name="debug" default="false" />
+    <node name="shape_db_creator" pkg="au_vision" type="shape_db_creator" output="screen">
       <param name="model" type="string" value="$(arg model)" />
+      <param name="db" type="string" value="$(arg db)" />
+      <param name="debug" type="boolean" value="$(arg debug)" />
       <!-- Parameter Set -->
-  		<rosparam file="$(find au_vision)/params/path_detector.yaml" />
-  		<rosparam file="$(find au_vision)/params/superpixel_filter.yaml" />
-      <rosparam file="$(find au_vision)/params/shape_db_creator.yaml" />
+      <rosparam file="$(find au_vision)/params/angle_path_db_creator.yaml" />
+      <rosparam file="$(find au_vision)/params/gate_db_creator.yaml" />
+      <rosparam file="$(find au_vision)/params/roulette_db_creator.yaml" />
+      <rosparam file="$(find au_vision)/params/torpedo_square_db_creator.yaml" />
+      <rosparam file="$(find au_vision)/params/heart_db_creator.yaml" />
     </node>
 </launch>

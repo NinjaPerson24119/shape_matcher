@@ -30,6 +30,9 @@ namespace gSLICr
 
 			// Write the segmentation result to a PGM image
 			void Write_Seg_Res_To_PGM(const char* fileName);
+
+			// Return superpixel information
+			const SpixelMap * Get_Spixel_Map();
 		};
 	}
 }

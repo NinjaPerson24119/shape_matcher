@@ -1,7 +1,3 @@
-/**
- * @author Nicholas Wengel
- */ 
-
 #ifdef GPU
 
 #ifndef AU_VISION_GPU_UTIL_H

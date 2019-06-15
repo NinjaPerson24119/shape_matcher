@@ -1,7 +1,3 @@
-/**
- * @author Nicholas Wengel
- */ 
-
 #include <au_vision/shape_analysis/gpu_util.h>
 
 namespace au_vision {

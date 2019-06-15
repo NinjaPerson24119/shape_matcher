@@ -1,19 +1,19 @@
-roulette_detector:
-  database: roulette.sa
+heart_detector:
+  database: heart.sa
 
-  min_points: 0
+  min_points: 10
   max_points: 0
-  minimum_contour_area: 15000
-  contour_linearization_epsilon: 9.0
+  minimum_contour_area: 5000
+  contour_linearization_epsilon: 4.0
 
-  area_difference_thresh: 200000
+  area_difference_thresh: 400000
 
-  color_difference_thresh: 1000 # disable color culling
-  morphology_filter_size: 23
+  color_difference_thresh: 50
+  morphology_filter_size: 13
 
-  minimum_rating: 0.2
+  minimum_rating: 0.8
 
-  minimum_shape_group_ratio: 0.2
+  minimum_shape_group_ratio: 0
 
   auto_filter_bins: 85
   auto_filter_black_margin: 30
@@ -25,7 +25,7 @@ roulette_detector:
   gSLICr_width: 1920
   gSLICr_height: 1080
 
-  gSLICr_noSegs: 100
+  gSLICr_noSegs: 250
   gSLICr_spixelSize: 16
 
   gSLICr_sizeInsteadOfNumber: 0
@@ -33,4 +33,5 @@ roulette_detector:
   gSLICr_cohWeight: 0.6
   gSLICr_noIters: 5
   gSLICr_doEnforceConnectivity: true
+
 

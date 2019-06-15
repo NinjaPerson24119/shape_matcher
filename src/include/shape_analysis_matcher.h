@@ -1,7 +1,3 @@
-/**
- * @author Nicholas Wengel
- */ 
-
 #ifdef GPU
 
 #ifndef AU_VISION_SHAPE_ANALYSIS_SHAPE_MATCHER
@@ -37,19 +33,23 @@ double groupAverageAreaRatio(
     const std::vector<std::vector<cv::Point>>& realtimeContours,
     const ShapeDb& db, const ShapeGroupMatch& match);
 
-cv::Rect scaledGroupBound(const ShapeDb& db, const ShapeGroupMatch& groupMatch);
-
 // Approximates the group distance
 double approximateGroupDistance(
     std::vector<std::vector<cv::Point>>& realtimeContours, ShapeDb& db,
     ShapeGroupMatch& match, const au_core::CameraInfo& cameraInfo);
 
+// Generates a rectangle about about the estimated *complete* group
+// That is, since there are likely missing shapes, compare the average scale /
+// position of RT contours to their DB counterparts, and use this info to offset
+// and scale the bounding rect stored in the DB
+cv::Rect scaledGroupBound(const ShapeDb& db, const ShapeGroupMatch& groupMatch);
+
 std::vector<ShapeGroupMatch> matchRealtimeContours(
     std::vector<std::vector<cv::Point>>& realtimeContours,
-    std::vector<cv::Scalar>& realtimeColors, ShapeDb& db,
+    std::vector<ShapeColor>& realtimeColors, ShapeDb& db,
     MatchShapesThresholds& shapeTh, MatchShapeGroupThresholds& groupTh,
-    ContourRenderer& renderer, std::vector<double>& bestLooseRatings,
-    const au_core::CameraInfo& cameraInfo);
+    std::vector<double>& bestLooseRatings,
+    const au_core::CameraInfo& cameraInfo, int parallelFrames);
 
 }  // namespace au_vision
 

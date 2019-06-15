@@ -1,7 +1,3 @@
-/**
- * @author Nicholas Wengel
- */ 
-
 #include <au_vision/shape_analysis/gpu_util.h>
 #include <au_vision/shape_analysis/shape_analysis.h>
 #include <au_vision/shape_analysis/shape_analysis_kernels.h>
@@ -10,11 +6,188 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
-#include <ctime>
 #include <fstream>
 #include <list>
+#include <opencv2/core/cuda.hpp>
+#include <opencv2/cudafilters.hpp>
 
 namespace au_vision {
+
+const char* dbHeaderString = "SHAPE_ANALYSIS_1";
+
+void packedToCompressed(const std::vector<PixelPack>& packedImage,
+                        uint8_t* compressed) {
+  int i = 0;
+  for (int k = 0; k < packedImage.size(); ++k) {
+    for (int l = 0; l < packedImage[k].repetitions; ++l) {
+      compressed[i + l] = packedImage[k].type;
+    }
+    i += packedImage[k].repetitions;
+  }
+}
+
+std::vector<PixelPack> compressedToPacked(const uint8_t* compressed,
+                                          int sizeBytes, int imageWidth) {
+  // Pack compressed image
+  std::vector<PixelPack> packs;
+  int i = 1;  // iterate image bytes
+  ROS_ASSERT(sizeBytes > 2);
+  PixelPack p = {compressed[0], 1};
+  while (i != sizeBytes) {
+    // complete pack if:
+    // - next byte doesn't equal the current type
+    if (compressed[i] != p.type || i % imageWidth == 0) {
+      packs.emplace_back(p);
+      p.repetitions = 1;
+      p.type = compressed[i];
+    } else {
+      ++p.repetitions;
+    }
+
+    // last byte condition
+    if (i + 1 == sizeBytes) {
+      packs.emplace_back(p);
+    }
+
+    // continue
+    ++i;
+  }
+  for (auto i : packs) {
+    ROS_ASSERT(i.repetitions);
+  }
+  return packs;
+}
+
+void averageContourColors(const cv::Mat& image,
+                          const std::vector<std::vector<cv::Point>>& contours,
+                          std::vector<ShapeColor>& colors, int filterSize,
+                          cv::Mat* outSampleRegions) {
+  ROS_ASSERT(image.type() == CV_8UC3);
+
+  // stream to run kernels in parallel
+  cv::cuda::Stream stream;
+
+  // render
+  std::vector<cv::cuda::GpuMat> dev_clip;
+  std::vector<cv::Rect> bounds;
+  for (int i = 0; i < contours.size(); ++i) {
+    // render
+    cv::Mat render(image.rows, image.cols, CV_8UC1, cv::Scalar(0));
+    std::vector<std::vector<cv::Point>> temp;
+    temp.push_back(contours[i]);
+    cv::drawContours(render, temp, -1, cv::Scalar(255), CV_FILLED);
+
+    // get bounding box and adjust for dilation size
+    bounds.emplace_back(cv::boundingRect(contours[i]));
+    int adj = filterSize;
+    bounds[i].x = bounds[i].x - adj > 0 ? bounds[i].x - adj : 0;
+    bounds[i].y = bounds[i].y - adj > 0 ? bounds[i].y - adj : 0;
+    bounds[i].width = bounds[i].x + adj < image.cols ? bounds[i].width + adj
+                                                     : image.cols - bounds[i].x;
+    bounds[i].height = bounds[i].y + adj < image.rows
+                           ? bounds[i].height + adj
+                           : image.rows - bounds[1].y;
+
+    // load to GPU
+    cv::Mat clip(render, bounds[i]);
+    dev_clip.emplace_back(cv::cuda::GpuMat());
+    dev_clip[i].upload(clip, stream);
+  }
+  stream.waitForCompletion();
+
+  // synchronous GPU calls
+  cv::Mat elem = cv::getStructuringElement(cv::MORPH_ELLIPSE,
+                                           cv::Size(filterSize, filterSize));
+  cv::Ptr<cv::cuda::Filter> efilter =
+      cv::cuda::createMorphologyFilter(cv::MORPH_ERODE, CV_8UC1, elem);
+  cv::Ptr<cv::cuda::Filter> dfilter =
+      cv::cuda::createMorphologyFilter(cv::MORPH_DILATE, CV_8UC1, elem);
+
+  // erode / dilate
+  std::vector<cv::cuda::GpuMat> dev_eroded, dev_dilated;
+  for (int i = 0; i < contours.size(); ++i) {
+    dev_eroded.emplace_back(cv::cuda::GpuMat());
+    dev_dilated.emplace_back(cv::cuda::GpuMat());
+    efilter->apply(dev_clip[i], dev_eroded[i], stream);
+    dfilter->apply(dev_clip[i], dev_dilated[i], stream);
+  }
+  stream.waitForCompletion();
+
+  // get interior / exterior
+  for (int i = 0; i < contours.size(); ++i) {
+    cv::cuda::bitwise_xor(dev_clip[i], dev_eroded[i], dev_eroded[i],
+                          cv::noArray(), stream);
+    cv::cuda::bitwise_xor(dev_clip[i], dev_dilated[i], dev_dilated[i],
+                          cv::noArray(), stream);
+  }
+  stream.waitForCompletion();
+
+  // upload image clips to GPU
+  std::vector<cv::cuda::GpuMat> dev_image_clips;
+  for (int i = 0; i < contours.size(); ++i) {
+    cv::Mat clip(image, bounds[i]);
+    dev_image_clips.emplace_back(cv::cuda::GpuMat());
+    dev_image_clips[i].upload(clip, stream);
+  }
+  stream.waitForCompletion();
+
+  // sum elements where mask is set
+  std::vector<cv::Scalar> intColor(contours.size());
+  std::vector<cv::Scalar> extColor(contours.size());
+  for (int i = 0; i < contours.size(); ++i) {
+    intColor[i] = cv::cuda::sum(dev_image_clips[i], dev_eroded[i]);
+    extColor[i] = cv::cuda::sum(dev_image_clips[i], dev_dilated[i]);
+  }
+
+  // count non-zero
+  std::vector<cv::cuda::HostMem> intCount(contours.size());
+  std::vector<cv::cuda::HostMem> extCount(contours.size());
+  for (int i = 0; i < contours.size(); ++i) {
+    cv::cuda::countNonZero(dev_eroded[i], intCount[i], stream);
+    cv::cuda::countNonZero(dev_dilated[i], extCount[i], stream);
+  }
+  stream.waitForCompletion();
+
+  // construct output
+  colors.clear();
+  for (int i = 0; i < contours.size(); ++i) {
+    // fetch
+    int ic;
+    const cv::Mat ic_mat(1, 1, CV_32SC1, &ic);
+    intCount[i].createMatHeader().copyTo(ic_mat);
+    int ec;
+    const cv::Mat ec_mat(1, 1, CV_32SC1, &ec);
+    extCount[i].createMatHeader().copyTo(ec_mat);
+
+    // divide
+    intColor[i] /= ic;
+    extColor[i] /= ec;
+
+    // push
+    ShapeColor c;
+    c.interior = intColor[i];
+    c.exterior = extColor[i];
+    c.validInterior = true;
+    c.validExterior = true;
+
+    colors.emplace_back(c);
+  }
+
+  // debug output
+  if (outSampleRegions != nullptr) {
+    *outSampleRegions = cv::Mat(image.rows, image.cols, CV_8UC1, cv::Scalar(0));
+    for (int i = 0; i < contours.size(); ++i) {
+      cv::Mat intMask, extMask;
+      dev_eroded[i].download(intMask);
+      dev_dilated[i].download(extMask);
+      intMask *= 0.3;
+      extMask *= 0.4;
+      cv::Mat where(*outSampleRegions, bounds[i]);
+      intMask.copyTo(where, intMask);
+      extMask.copyTo(where, extMask);
+    }
+  }
+}
 
 ColorRange::ColorRange(const cv::Scalar& target, int variance) {
   lower = target;
@@ -28,7 +201,7 @@ ColorRange::ColorRange(const cv::Scalar& target, int variance) {
 bool ColorRange::contains(const ColorRange& other) {
   int nested = 0;
   for (int k = 0; k < 3; ++k) {
-    if (lower[k] >= other.lower[k] && upper[k] <= other.upper[k]) {
+    if (lower[k] <= other.lower[k] && upper[k] >= other.upper[k]) {
       ++nested;
     }
   }
@@ -40,22 +213,18 @@ bool ColorRange::contains(const ColorRange& other) {
 }
 
 void ShapeDb::addGroup(const std::vector<Shape>& newShapes,
-                       ContourRenderer& renderer, const std::string& name,
-                       const cv::Scalar& pose, const cv::Rect& groupBound) {
+                       const std::string& name, const cv::Scalar& pose,
+                       const cv::Rect& groupBound) {
   if (!newShapes.size()) {
     return;
   }
 
-  // Verify grids
-  ROS_ASSERT(goodForAdd());
-
-  // Verify renderer
-  ROS_ASSERT(rendererIsCompatible(renderer));
+  // check params have been set
+  ROS_ASSERT(frameBufferWidth && frameBufferHeight);
 
   // Build group
   ShapeGroup group;
   group.pose = pose;
-
   for (int i = 0; i < newShapes.size(); ++i) {
     group.shapeIndices.push_back(i + shapes.size());
   }
@@ -66,19 +235,37 @@ void ShapeDb::addGroup(const std::vector<Shape>& newShapes,
   // Iterate over shapes
   for (auto s : newShapes) {
     // Render the contour
-    cv::Mat raster;
-    renderer.render(s.contour, raster);
+    cv::Mat raster(frameBufferHeight, frameBufferWidth, CV_8UC1, cv::Scalar(0));
+    std::vector<std::vector<cv::Point>> contours;
+    contours.push_back(s.contour);
+    cv::drawContours(raster, contours, -1, cv::Scalar(255), CV_FILLED);
 
-    // Kernel variables
-    size_t gridArea = gridRows * gridCols;
-    int* bins = new int[gridArea];
-    int* dev_bins;
-    gpuErrorCheck(cudaMalloc(&dev_bins, gridArea * sizeof(int)));
+    // Compress every 8 uchars into a single byte of bits (with GPU)
     unsigned char* dev_raster;
     size_t rasterBytes = sizeof(unsigned char) * raster.rows * raster.cols;
     gpuErrorCheck(cudaMalloc(&dev_raster, rasterBytes));
     gpuErrorCheck(cudaMemcpy(dev_raster, raster.data, rasterBytes,
                              cudaMemcpyHostToDevice));
+
+    size_t compressedBytes = rasterBytes / 8;
+    uint8_t* compressed = new unsigned char[compressedBytes];
+    uint8_t* dev_compressed;
+    gpuErrorCheck(cudaMalloc(&dev_compressed, compressedBytes));
+
+    callRasterToCompressed_device(dev_raster, dev_compressed, rasterBytes);
+
+    gpuErrorCheck(cudaMemcpy(compressed, dev_compressed, compressedBytes,
+                             cudaMemcpyDeviceToHost));
+
+    // Pack compressed image
+    packedImages.emplace_back(
+        compressedToPacked(compressed, compressedBytes, frameBufferWidth / 8));
+
+    // grids
+    size_t gridArea = gridRows * gridCols;
+    int* bins = new int[gridArea];
+    int* dev_bins;
+    gpuErrorCheck(cudaMalloc(&dev_bins, gridArea * sizeof(int)));
 
     // Call kernel
     callBinRasterToGrid_device(dev_raster, gridRows, gridCols, squareSize,
@@ -88,112 +275,104 @@ void ShapeDb::addGroup(const std::vector<Shape>& newShapes,
     gpuErrorCheck(cudaMemcpy(bins, dev_bins, gridArea * sizeof(int),
                              cudaMemcpyDeviceToHost));
 
-    // Deallocate
-    gpuErrorCheck(cudaFree(dev_bins));
-    gpuErrorCheck(cudaFree(dev_raster));
-
     // Append the bins to the existing grids
+    grids.reserve(grids.size() + gridArea);
     std::copy(bins, bins + gridArea, std::back_inserter(grids));
 
     // Add color
     for (int i = 0; i < 3; ++i) {
-      colors.push_back(s.color[i]);
+      interiorColors.push_back(s.color.interior[i]);
+      exteriorColors.push_back(s.color.exterior[i]);
     }
+
+    // Deallocate
+    gpuErrorCheck(cudaFree(dev_bins));
+    gpuErrorCheck(cudaFree(dev_raster));
+    gpuErrorCheck(cudaFree(dev_compressed));
+    delete[] compressed;
+    delete[] bins;
 
     shapes.push_back(s);
   }
 }
 
 void ShapeDb::loadToGpu() {
-  ROS_ASSERT(dev_grids == nullptr && dev_colors == nullptr);
-  ROS_ASSERT(grids.size());
-  ROS_ASSERT(colors.size());
-  ROS_ASSERT(goodForDetect());
+  ROS_ASSERT(!loadedGpu);
+  ROS_ASSERT(shapes.size());
 
-  // Upload grids to GPU
+  // for async CUDA
+  cudaStream_t stream;
+  gpuErrorCheck(cudaStreamCreate(&stream));
+
+  // allocate
+
   size_t gridsBytes = gridRows * gridCols * shapes.size() * sizeof(int);
   gpuErrorCheck(cudaMalloc(&dev_grids, gridsBytes));
-  gpuErrorCheck(
-      cudaMemcpy(dev_grids, &grids[0], gridsBytes, cudaMemcpyHostToDevice));
 
-  // Upload colors to GPU
+  // get maximum number of packs per image
+  // pixel packs on GPU will be uploaded in same size memory blocks for each
+  // image regardless of their individual pixel packs (to avoid architectural
+  // issues with device pointers to device pointers)
+  maxPacks = 0;
+  for (int i = 0; i < packedImages.size(); ++i) {
+    if (packedImages[i].size() > maxPacks) {
+      maxPacks = packedImages[i].size();
+    }
+  }
+  ROS_ASSERT(maxPacks);
+  gpuErrorCheck(cudaMalloc(&dev_packedImages,
+                           packedImages.size() * sizeof(PixelPack) * maxPacks));
+
   size_t colorsBytes = shapes.size() * sizeof(unsigned char) * 3;
-  gpuErrorCheck(cudaMalloc(&dev_colors, colorsBytes));
-  gpuErrorCheck(
-      cudaMemcpy(dev_colors, &colors[0], colorsBytes, cudaMemcpyHostToDevice));
+  gpuErrorCheck(cudaMalloc(&dev_interiorColors, colorsBytes));
+  gpuErrorCheck(cudaMalloc(&dev_exteriorColors, colorsBytes));
+
+  // upload to GPU
+  gpuErrorCheck(cudaMemcpyAsync(dev_grids, &grids[0], gridsBytes,
+                                cudaMemcpyHostToDevice, stream));
+
+  for (int i = 0; i < packedImages.size(); ++i) {
+    gpuErrorCheck(cudaMemcpyAsync(dev_packedImages + maxPacks * i,
+                                  &packedImages[i][0],
+                                  packedImages[i].size() * sizeof(PixelPack),
+                                  cudaMemcpyHostToDevice, stream));
+  }
+
+  gpuErrorCheck(cudaMemcpyAsync(dev_interiorColors, &interiorColors[0],
+                                colorsBytes, cudaMemcpyHostToDevice, stream));
+  gpuErrorCheck(cudaMemcpyAsync(dev_exteriorColors, &exteriorColors[0],
+                                colorsBytes, cudaMemcpyHostToDevice, stream));
+
+  gpuErrorCheck(cudaStreamSynchronize(stream));
+  gpuErrorCheck(cudaStreamDestroy(stream));
+
+  loadedGpu = true;
 }
 
 void ShapeDb::unloadFromGpu() {
-  ROS_ASSERT(dev_grids != nullptr);
+  ROS_ASSERT(loadedGpu);
 
   gpuErrorCheck(cudaFree(dev_grids));
-  gpuErrorCheck(cudaFree(dev_colors));
+  gpuErrorCheck(cudaFree(dev_packedImages));
+  gpuErrorCheck(cudaFree(dev_interiorColors));
+  gpuErrorCheck(cudaFree(dev_exteriorColors));
 
   dev_grids = nullptr;
-  dev_colors = nullptr;
+  dev_packedImages = nullptr;
+  dev_interiorColors = nullptr;
+  dev_exteriorColors = nullptr;
+
+  loadedGpu = false;
 }
 
 ShapeDb::~ShapeDb() {
-  if (dev_grids != nullptr) {
+  if (loadedGpu) {
     unloadFromGpu();
   }
 }
 
-bool ShapeDb::rendererIsCompatible(ContourRenderer& renderer) {
-  if (renderer.width() != frameBufferWidth) {
-    return false;
-  }
-  if (renderer.height() != frameBufferHeight) {
-    return false;
-  }
-  return true;
-}
-
-bool ShapeDb::goodForAdd() {
-  if (!gridCols) {
-    return false;
-  }
-  if (!gridRows) {
-    return false;
-  }
-  if (!frameBufferWidth) {
-    return false;
-  }
-  if (!frameBufferHeight) {
-    return false;
-  }
-  if (!squareSize) {
-    return false;
-  }
-  if (frameBufferWidth % squareSize != 0) {
-    return false;
-  }
-  if (frameBufferHeight % squareSize != 0) {
-    return false;
-  }
-  return true;
-}
-
-bool ShapeDb::goodForDetect() {
-  if (!goodForAdd()) {
-    return false;
-  }
-  if (!shapes.size()) {
-    return false;
-  }
-  if (!groups.size()) {
-    return false;
-  }
-  if (grids.size() != shapes.size() * gridRows * gridCols) {
-    return false;
-  }
-  return true;
-}
-
 void centerAndMaximizeContour(std::vector<cv::Point>& contour, int width,
                               int height) {
-  // TODO: GPU accelerate
-
   // Find bounding box
   cv::Rect bound = cv::boundingRect(contour);
 
@@ -225,7 +404,8 @@ void centerAndMaximizeContour(std::vector<cv::Point>& contour, int width,
 }
 
 void cullContours(std::vector<std::vector<cv::Point>>& contours, int imageWidth,
-                  int imageHeight, double minArea) {
+                  int imageHeight, double minArea, int minPoints,
+                  int maxPoints) {
   // Calculate contour areas
   std::vector<double> contourAreas(contours.size());
   for (int i = 0; i < contours.size(); ++i) {
@@ -274,9 +454,11 @@ void cullContours(std::vector<std::vector<cv::Point>>& contours, int imageWidth,
 
   // Remove contours with too few points (require > 2)
   {
+    int max = (maxPoints == 0) ? std::numeric_limits<int>::max() : maxPoints;
     int i = 0;
-    while (true && contours.size() != 0) {
-      if (contours[i].size() < 3) {
+    while (contours.size() != 0) {
+      if (contours[i].size() < 3 || contours[i].size() < minPoints ||
+          contours[i].size() > max) {
         contourAreas.erase(contourAreas.begin() + i);
         contours.erase(contours.begin() + i);
         i = 0;
@@ -287,23 +469,6 @@ void cullContours(std::vector<std::vector<cv::Point>>& contours, int imageWidth,
       }
     }
   }
-}
-
-// Calculates the distance between two points
-// TODO: Actually use this function for coherency testing
-double calcDistance(const cv::Point& A, const cv::Point& B) {
-  std::complex<double> a(A.x, A.y);
-  std::complex<double> b(B.x, B.y);
-  return sqrt(std::norm(b - a));
-}
-
-// Calculates the degrees angle between two points, with the x-axis as the
-// reference
-// TODO: Actually use this function for coherency testing
-double calcVectorAngle(const cv::Point& A, const cv::Point& B) {
-  double r = calcDistance(A, B);
-  double x = std::abs(A.x - B.x);
-  return std::acos(x / r) * 180 / PI;
 }
 
 void loadShapeAnalysisDatabase(const std::string& filename, ShapeDb& db) {
@@ -325,8 +490,10 @@ void loadShapeAnalysisDatabase(const std::string& filename, ShapeDb& db) {
   std::string line;
   try {
     std::getline(file, line);
-    if (line != "SHAPE_ANALYSIS_DATABASE") {
-      ROS_FATAL("Could not load shape analysis database. Invalid header.");
+    if (line != dbHeaderString) {
+      ROS_FATAL(
+          "Could not load shape analysis database. Invalid header (maybe wrong "
+          "DB version?).");
       ROS_BREAK();
     }
   } catch (...) {
@@ -334,7 +501,7 @@ void loadShapeAnalysisDatabase(const std::string& filename, ShapeDb& db) {
     ROS_BREAK();
   }
 
-  // Read grid parameters
+  // Read render parameters
   try {
     std::getline(file, line);
     db.gridRows = std::stoi(line);
@@ -349,7 +516,7 @@ void loadShapeAnalysisDatabase(const std::string& filename, ShapeDb& db) {
     std::getline(file, line);
     db.renderDistance = std::stod(line);
   } catch (...) {
-    ROS_FATAL("Could not read grid params");
+    ROS_FATAL("Could not read render params");
     ROS_BREAK();
   }
 
@@ -363,9 +530,15 @@ void loadShapeAnalysisDatabase(const std::string& filename, ShapeDb& db) {
     ROS_BREAK();
   }
 
-  // Reserve memory for grids, shapes
+  // Reserve memory for colors, shapes
+  db.grids.clear();
+  db.interiorColors.clear();
+  db.exteriorColors.clear();
+  db.shapes.clear();
+
   db.grids.reserve(db.gridRows * db.gridCols * shapeNum);
-  db.colors.reserve(shapeNum * 3);
+  db.interiorColors.reserve(shapeNum * 3);
+  db.exteriorColors.reserve(shapeNum * 3);
   db.shapes.reserve(shapeNum);
 
   try {
@@ -378,11 +551,20 @@ void loadShapeAnalysisDatabase(const std::string& filename, ShapeDb& db) {
       // Get color
       for (int i = 0; i < 3; ++i) {
         std::getline(file, line);
-        shape.color[i] = std::stoi(line);
-        db.colors.push_back(shape.color[i]);
+        shape.color.interior[i] = std::stoi(line);
+        db.interiorColors.push_back(shape.color.interior[i]);
       }
+      for (int i = 0; i < 3; ++i) {
+        std::getline(file, line);
+        shape.color.exterior[i] = std::stoi(line);
+        db.exteriorColors.push_back(shape.color.exterior[i]);
+      }
+      std::getline(file, line);
+      shape.color.validInterior = std::stoi(line);
+      std::getline(file, line);
+      shape.color.validExterior = std::stoi(line);
 
-      // Get area
+      // Get areas
       std::getline(file, line);
       shape.area = std::stod(line);
 
@@ -396,18 +578,18 @@ void loadShapeAnalysisDatabase(const std::string& filename, ShapeDb& db) {
       std::getline(file, line);
       shape.bound.height = std::stoi(line);
 
-      // Get contour
-      std::getline(file, line);
-      int points = std::stoi(line);
-      for (int i = 0; i < points; ++i) {
+      // Get packed image
+      PixelPack pack;
+      db.packedImages.push_back(std::vector<PixelPack>());
+      while (true) {
         std::getline(file, line);
-        int thisX = std::stoi(line);
-
+        pack.type = std::stoi(line);
         std::getline(file, line);
-        int thisY = std::stoi(line);
-
-        cv::Point thisPoint(thisX, thisY);
-        shape.contour.push_back(thisPoint);
+        pack.repetitions = std::stoi(line);
+        db.packedImages[s].push_back(pack);
+        if (pack.repetitions == 0) {
+          break;
+        }
       }
 
       // Get grid
@@ -502,10 +684,9 @@ void saveShapeAnalysisDatabase(const std::string& filename, const ShapeDb& db) {
 
   try {
     // Header
-    file << "SHAPE_ANALYSIS_DATABASE"
-         << "\n";
+    file << dbHeaderString << "\n";
 
-    // Grid params
+    // Render params
     file << std::to_string(db.gridRows) << "\n";
     file << std::to_string(db.gridCols) << "\n";
     file << std::to_string(db.squareSize) << "\n";
@@ -524,8 +705,13 @@ void saveShapeAnalysisDatabase(const std::string& filename, const ShapeDb& db) {
 
       // Color
       for (int i = 0; i < 3; ++i) {
-        file << std::to_string((int)db.shapes[s].color[i]) << "\n";
+        file << std::to_string((int)db.shapes[s].color.interior[i]) << "\n";
       }
+      for (int i = 0; i < 3; ++i) {
+        file << std::to_string((int)db.shapes[s].color.exterior[i]) << "\n";
+      }
+      file << std::to_string((int)db.shapes[s].color.validInterior) << "\n";
+      file << std::to_string((int)db.shapes[s].color.validExterior) << "\n";
 
       // Area
       file << std::to_string(db.shapes[s].area) << "\n";
@@ -536,12 +722,12 @@ void saveShapeAnalysisDatabase(const std::string& filename, const ShapeDb& db) {
       file << std::to_string((int)db.shapes[s].bound.width) << "\n";
       file << std::to_string((int)db.shapes[s].bound.height) << "\n";
 
-      // Contour
-      file << std::to_string(db.shapes[s].contour.size()) << "\n";
-      for (int i = 0; i < db.shapes[s].contour.size(); ++i) {
-        file << std::to_string(db.shapes[s].contour[i].x) << "\n";
-        file << std::to_string(db.shapes[s].contour[i].y) << "\n";
+      // Packed image
+      for (int i = 0; i < db.packedImages[s].size(); ++i) {
+        file << std::to_string(db.packedImages[s][i].type) << "\n";
+        file << std::to_string(db.packedImages[s][i].repetitions) << "\n";
       }
+      file << "0\n0\n";
 
       // Grid
       int initialGrid = db.gridRows * db.gridCols * s;

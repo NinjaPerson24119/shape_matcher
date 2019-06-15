@@ -1,14 +1,16 @@
-/**
- * @author Nicholas Wengel
- */ 
-
 #include <au_vision/shape_analysis/gpu_util.h>
 #include <au_vision/shape_analysis/shape_analysis_kernels.h>
 #include <au_vision/shape_analysis/shape_analysis_matcher.h>
+
 #include <ros/ros.h>
+
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <set>
+
+// DEBUG TODO
+#include <ctime>
 
 namespace au_vision {
 
@@ -27,6 +29,26 @@ double groupAverageAreaRatio(
   averageAreaRatio /= match.parts.size();
 
   return averageAreaRatio;
+}
+
+double approximateGroupDistance(double groupAreaRatio,
+                                const au_core::CameraInfo& cameraInfo) {
+  /*
+  // Get average RT contour area
+  double averageAreaRatio = 0;
+  ShapeGroup& group = db.groups[match.groupIndex];
+  for (int i = 0; i < match.parts.size(); ++i) {
+    double thisRtArea =
+        cv::contourArea(realtimeContours[match.parts[i].rtIndex]);
+    double thisDbArea = db.shapes[group.shapeIndices[i]].area;
+    averageAreaRatio += thisDbArea / thisRtArea;
+  }
+  averageAreaRatio /= match.parts.size();
+
+  // Scale according to render distance
+  return averageAreaRatio * db.renderDistance;
+  */
+  return 0;  // DEBUG because SEGFAULT
 }
 
 cv::Rect scaledGroupBound(const ShapeDb& db,
@@ -67,120 +89,248 @@ cv::Rect scaledGroupBound(const ShapeDb& db,
   return finalBound;
 }
 
-double approximateGroupDistance(double groupAreaRatio,
-                                const au_core::CameraInfo& cameraInfo) {
-  /*
-  // Get average RT contour area
-  double averageAreaRatio = 0;
-  ShapeGroup& group = db.groups[match.groupIndex];
-  for (int i = 0; i < match.parts.size(); ++i) {
-    double thisRtArea =
-        cv::contourArea(realtimeContours[match.parts[i].rtIndex]);
-    double thisDbArea = db.shapes[group.shapeIndices[i]].area;
-    averageAreaRatio += thisDbArea / thisRtArea;
-  }
-  averageAreaRatio /= match.parts.size();
-
-  // Scale according to render distance
-  return averageAreaRatio * db.renderDistance;
-  */
-  return 0;  // DEBUG because SEGFAULT
-}
-
 std::vector<ShapeGroupMatch> matchRealtimeContours(
     std::vector<std::vector<cv::Point>>& realtimeContours,
-    std::vector<cv::Scalar>& realtimeColors, ShapeDb& db,
+    std::vector<ShapeColor>& realtimeColors, ShapeDb& db,
     MatchShapesThresholds& shapeTh, MatchShapeGroupThresholds& groupTh,
-    ContourRenderer& renderer, std::vector<double>& bestLooseRatings,
-    const au_core::CameraInfo& cameraInfo) {
-  int debugPreMatch = 0;
-  int debugMatches = 0;
+    std::vector<double>& bestLooseRatings,
+    const au_core::CameraInfo& cameraInfo, int parallelFrames) {
+  ROS_ASSERT(parallelFrames);
+  ROS_ASSERT(realtimeColors.size() == realtimeContours.size());
 
-  // Verify grids and renderer and shapes list
-  ROS_ASSERT(db.goodForDetect());
-  ROS_ASSERT(db.rendererIsCompatible(renderer));
+  // return immediately if there's no work to be done
+  if (realtimeContours.size() == 0) {
+    return std::vector<ShapeGroupMatch>();
+  }
+
+  size_t roughAreaDifferencesBytes = db.shapes.size() * sizeof(int);
+  size_t colorDifferencesBytes = db.shapes.size() * sizeof(int);
+  size_t compressedImageBytes =
+      (db.frameBufferWidth * db.frameBufferHeight) / 8;
 
   // Allocations
+  std::vector<int*> dev_roughAreaDifferences(realtimeContours.size());
+  std::vector<int*> dev_interiorColorDifferences(realtimeContours.size());
+  std::vector<int*> dev_exteriorColorDifferences(realtimeContours.size());
+  std::vector<int*> roughAreaDifferences(realtimeContours.size());
+  std::vector<int*> interiorColorDifferences(realtimeContours.size());
+  std::vector<int*> exteriorColorDifferences(realtimeContours.size());
+  uint8_t* rtImage;
+  uint32_t* dev_dbImages;
+  uint32_t* dev_dbImagesResult;
   int* dev_areaDifferences;
-  size_t areaDifferencesBytes = db.shapes.size() * sizeof(int);
-  int* areaDifferences = new int[db.shapes.size()];
-  gpuErrorCheck(cudaMalloc(&dev_areaDifferences, areaDifferencesBytes));
+  int* areaDifferences;
+  std::vector<uint32_t*> dev_rtImages(realtimeContours.size());
 
-  int* dev_colorDifferences;
-  size_t colorDifferencesBytes = db.shapes.size() * sizeof(int);
-  int* colorDifferences = new int[db.shapes.size()];
-  gpuErrorCheck(cudaMalloc(&dev_colorDifferences, colorDifferencesBytes));
+  for (int r = 0; r < realtimeContours.size(); ++r) {
+    gpuErrorCheck(
+        cudaMalloc(&dev_roughAreaDifferences[r], roughAreaDifferencesBytes));
+    gpuErrorCheck(
+        cudaMalloc(&dev_interiorColorDifferences[r], colorDifferencesBytes));
+    gpuErrorCheck(
+        cudaMalloc(&dev_exteriorColorDifferences[r], colorDifferencesBytes));
+    roughAreaDifferences[r] = new int[db.shapes.size()];
+    interiorColorDifferences[r] = new int[db.shapes.size()];
+    exteriorColorDifferences[r] = new int[db.shapes.size()];
 
-  // Iterate over real time contours
+    gpuErrorCheck(cudaMalloc(&dev_rtImages[r], compressedImageBytes));
+  }
+  rtImage = new uint8_t[compressedImageBytes];
+
+  gpuErrorCheck(
+      cudaMalloc(&dev_dbImages, compressedImageBytes * parallelFrames));
+  gpuErrorCheck(
+      cudaMalloc(&dev_dbImagesResult, compressedImageBytes * parallelFrames));
+
+  gpuErrorCheck(cudaMalloc(&dev_areaDifferences, sizeof(int) * parallelFrames));
+  areaDifferences = new int[parallelFrames];
+
+  // for async CUDA
+  cudaStream_t stream;
+  gpuErrorCheck(cudaStreamCreate(&stream));
+
+  // rtMatchBins holds the potential matches for each shape in the DB
   std::vector<std::vector<ShapeMatch>> rtMatchBins(db.shapes.size());
+
+  // holds the loose matches
   std::vector<std::vector<ShapeMatch>> rtMatches(realtimeContours.size());
 
-  for (int rtIndex = 0; rtIndex < realtimeContours.size(); ++rtIndex) {
-    // Process the contour
-    std::vector<cv::Point> processedContour = realtimeContours[rtIndex];
-    centerAndMaximizeContour(processedContour, renderer.width(),
-                             renderer.height());
+  // prepare realtime contours for comparisons
+  std::vector<ShapeDb> rtDb(realtimeContours.size(), ShapeDb(db));
 
-    // Get RT DB (make dummy group with single contour)
-    ShapeDb rtDb(db);
+  for (int r = 0; r < realtimeContours.size(); ++r) {
+    // process the contour
+    std::vector<cv::Point> processedContour;
+    processedContour = realtimeContours[r];
+    centerAndMaximizeContour(processedContour, db.frameBufferWidth,
+                             db.frameBufferHeight);
+
+    // build rt DB (make dummy group with single contour)
     Shape rtShape;
     rtShape.contour = processedContour;
     rtShape.name = "rtPart";
-    rtShape.color = realtimeColors[rtIndex];
+    rtShape.color = realtimeColors[r];
     std::vector<Shape> rtShapeVec;
-    rtShapeVec.emplace_back(rtShape);
+    rtShapeVec.push_back(rtShape);
     cv::Rect tempBound;
-    rtDb.addGroup(rtShapeVec, renderer, "rtGroup", cv::Scalar(0, 0, 0),
-                  tempBound);
-    rtDb.loadToGpu();
+    rtDb[r].addGroup(rtShapeVec, "rtGroup", cv::Scalar(0, 0, 0), tempBound);
+    rtDb[r].loadToGpu();
 
     // Compare RT grids to DB grids (rough area difference)
     callRoughShapeAreaDifferences_device(
-        rtDb.dev_grids, db.dev_grids, db.gridRows, db.gridCols,
-        db.shapes.size(), dev_areaDifferences, rtDb.dev_colors, db.dev_colors,
-        dev_colorDifferences);
+        rtDb[r].dev_grids, db.dev_grids, db.gridRows, db.gridCols,
+        db.shapes.size(), dev_roughAreaDifferences[r], stream);
 
-    // Load differences back to host
-    gpuErrorCheck(cudaMemcpy(areaDifferences, dev_areaDifferences,
-                             areaDifferencesBytes, cudaMemcpyDeviceToHost));
-    gpuErrorCheck(cudaMemcpy(colorDifferences, dev_colorDifferences,
-                             colorDifferencesBytes, cudaMemcpyDeviceToHost));
+    // Compare RT and DB colors (color differences)
+    callColorDifferences_device(
+        rtDb[r].dev_interiorColors, db.dev_interiorColors,
+        dev_interiorColorDifferences[r], db.shapes.size(), shapeTh.blackMargin,
+        shapeTh.whiteMargin, stream);
+    callColorDifferences_device(
+        rtDb[r].dev_exteriorColors, db.dev_exteriorColors,
+        dev_exteriorColorDifferences[r], db.shapes.size(), shapeTh.blackMargin,
+        shapeTh.whiteMargin, stream);
 
-    // Cull based on shape thresholds
-    std::vector<int> bestIndices;
-    for (int i = 0; i < db.shapes.size(); ++i) {
-      if (areaDifferences[i] < shapeTh.areaDifferenceThresh &&
-          colorDifferences[i] < shapeTh.colorDifferenceThresh) {
-        ++debugPreMatch;
-        bestIndices.push_back(i);
+    // unpack rt image to device
+    packedToCompressed(rtDb[r].packedImages[0], rtImage);
+    gpuErrorCheck(cudaMemcpy(dev_rtImages[r], rtImage, compressedImageBytes,
+                             cudaMemcpyHostToDevice));
+  }
+  gpuErrorCheck(cudaStreamSynchronize(stream));
+  gpuErrorCheck(cudaGetLastError());  // Verify that all went OK
+
+  // copy color differences back to host
+  for (int r = 0; r < realtimeContours.size(); ++r) {
+    gpuErrorCheck(cudaMemcpyAsync(
+        roughAreaDifferences[r], dev_roughAreaDifferences[r],
+        roughAreaDifferencesBytes, cudaMemcpyDeviceToHost, stream));
+    gpuErrorCheck(cudaMemcpyAsync(
+        interiorColorDifferences[r], dev_interiorColorDifferences[r],
+        colorDifferencesBytes, cudaMemcpyDeviceToHost, stream));
+    gpuErrorCheck(cudaMemcpyAsync(
+        exteriorColorDifferences[r], dev_exteriorColorDifferences[r],
+        colorDifferencesBytes, cudaMemcpyDeviceToHost, stream));
+  }
+  gpuErrorCheck(cudaStreamSynchronize(stream));
+  gpuErrorCheck(cudaGetLastError());  // Verify that all went OK
+
+  // do area comparisons in batches of frames (so we only need to unpack each
+  // image once)
+  for (int k = 0; k < db.packedImages.size(); k += parallelFrames) {
+    int batchSize = k + parallelFrames < db.packedImages.size()
+                        ? parallelFrames
+                        : db.packedImages.size() - k;
+
+    // unpack one batch of images
+    callPackedToCompressed_device(db.dev_packedImages + k * db.maxPacks,
+                                  dev_dbImages, batchSize, compressedImageBytes,
+                                  db.maxPacks, stream);
+    gpuErrorCheck(cudaStreamSynchronize(stream));
+    gpuErrorCheck(cudaGetLastError());  // Verify that all went OK
+
+    // compare this batch to each rt contour
+    for (int r = 0; r < realtimeContours.size(); ++r) {
+      // build list of shapes that weren't culled by the rough area differences
+      std::vector<int> validIndices;
+      for (int i = 0; i < batchSize; ++i) {
+        if (roughAreaDifferences[r][k + i] < shapeTh.areaDifferenceThresh) {
+          validIndices.push_back(i);
+        }
       }
-    }
 
-    // Compare RT raster and DB raster (fine area difference)
-    // Double check shape thresholds
-    cv::Mat rtRaster, dbRaster;
-    for (auto m : bestIndices) {
-      // Render
-      renderer.render(processedContour, rtRaster);
-      renderer.render(db.shapes[m].contour, dbRaster);
+      size_t uint32ImageStep = compressedImageBytes / sizeof(uint32_t);
 
-      // Difference
-      cv::bitwise_not(dbRaster, dbRaster);
-      cv::bitwise_and(rtRaster, dbRaster, rtRaster);
-      int thisDiff = cv::countNonZero(rtRaster);
+      // XOR
+      for (int n = 0; n < validIndices.size(); ++n) {
+        uint32_t* dbImg = dev_dbImages + validIndices[n] * uint32ImageStep;
+        uint32_t* dbImgResult =
+            dev_dbImagesResult + validIndices[n] * uint32ImageStep;
+        callCompressedXOR_device(dev_rtImages[r], dbImg, dbImgResult,
+                                 uint32ImageStep, stream);
+      }
+      gpuErrorCheck(cudaStreamSynchronize(stream));
+      gpuErrorCheck(cudaGetLastError());  // Verify that all went OK
 
-      if (thisDiff < shapeTh.areaDifferenceThresh) {
-        ShapeMatch temp;
-        temp.rtIndex = rtIndex;
-        temp.dbIndex = m;
-        temp.rating =
-            1.0 - (double)thisDiff / (double)shapeTh.areaDifferenceThresh;
-        rtMatchBins[m].push_back(temp);
-        rtMatches[rtIndex].push_back(temp);
-        ++debugMatches;
+      // population count
+      for (int n = 0; n < validIndices.size(); ++n) {
+        uint32_t* dbImgResult =
+            dev_dbImagesResult + validIndices[n] * uint32ImageStep;
+        callPopulationCount_device(dbImgResult, dbImgResult, uint32ImageStep,
+                                   stream);
+      }
+      gpuErrorCheck(cudaStreamSynchronize(stream));
+      gpuErrorCheck(cudaGetLastError());  // Verify that all went OK
+
+      // sum
+      gpuErrorCheck(
+          cudaMemset(dev_areaDifferences, 0, batchSize * sizeof(int)));
+      for (int n = 0; n < validIndices.size(); ++n) {
+        uint32_t* dbImgResult =
+            dev_dbImagesResult + validIndices[n] * uint32ImageStep;
+        callSumImage_device(dbImgResult, dev_areaDifferences + validIndices[n],
+                            uint32ImageStep, stream);
+      }
+      gpuErrorCheck(cudaStreamSynchronize(stream));
+      gpuErrorCheck(cudaGetLastError());  // Verify that all went OK
+
+      // copy threshold results and area differences back to host
+      gpuErrorCheck(cudaMemcpy(areaDifferences, dev_areaDifferences,
+                               batchSize * sizeof(int),
+                               cudaMemcpyDeviceToHost));
+
+      // identify shapes that pass thresholds
+      for (int n = 0; n < validIndices.size(); ++n) {
+        int idx = k + validIndices[n];
+        bool passInteriorColor =
+            (interiorColorDifferences[r][idx] < shapeTh.colorDifferenceThresh &&
+             db.shapes[idx].color.validInterior &&
+             realtimeColors[r].validInterior) ||
+            !db.shapes[idx].color.validInterior;
+        bool passExteriorColor =
+            (exteriorColorDifferences[r][idx] < shapeTh.colorDifferenceThresh &&
+             db.shapes[idx].color.validExterior &&
+             realtimeColors[r].validExterior) ||
+            !db.shapes[idx].color.validExterior;
+        bool passAreaDifference =
+            areaDifferences[validIndices[n]] < shapeTh.areaDifferenceThresh;
+
+        if (passInteriorColor && passExteriorColor && passAreaDifference) {
+          ShapeMatch temp;
+          temp.rtIndex = r;
+          temp.dbIndex = idx;
+          temp.rating = 1 - (double)areaDifferences[validIndices[n]] /
+                                (double)shapeTh.areaDifferenceThresh;
+          rtMatchBins[idx].push_back(temp);
+          rtMatches[r].push_back(temp);
+        }
       }
     }
   }
+
+  // deallocations
+  for (int r = 0; r < realtimeContours.size(); ++r) {
+    gpuErrorCheck(cudaFree(dev_roughAreaDifferences[r]));
+    gpuErrorCheck(cudaFree(dev_interiorColorDifferences[r]));
+    gpuErrorCheck(cudaFree(dev_exteriorColorDifferences[r]));
+    delete[] roughAreaDifferences[r];
+    delete[] interiorColorDifferences[r];
+    delete[] exteriorColorDifferences[r];
+
+    gpuErrorCheck(cudaFree(dev_rtImages[r]));
+  }
+  delete[] rtImage;
+
+  gpuErrorCheck(cudaFree(dev_dbImages));
+  gpuErrorCheck(cudaFree(dev_dbImagesResult));
+
+  gpuErrorCheck(cudaFree(dev_areaDifferences));
+  delete[] areaDifferences;
+
+  gpuErrorCheck(cudaStreamDestroy(stream));
+
+  // Note that this next section requires that *all* of the calculations for
+  // *all* shapes have been completed. This next section is a reduction step so
+  // will be done sequentially
 
   // Find the best match rating for each RT contour
   bestLooseRatings = std::vector<double>(realtimeContours.size(), 0.0);
@@ -242,6 +392,7 @@ std::vector<ShapeGroupMatch> matchRealtimeContours(
             indices.insert(rtBestMatches[j].rtIndex);
           } else {
             differentContours = false;
+            break;
           }
         }
       }
@@ -256,14 +407,30 @@ std::vector<ShapeGroupMatch> matchRealtimeContours(
   std::vector<double> groupRatings;
   for (auto g : groupsToTry) {
     double rating = 0;
-    for (auto j : db.groups[g].shapeIndices) {
+    for (int k = 0; k < db.groups[g].shapeIndices.size(); ++k) {
+      auto j = db.groups[g].shapeIndices[k];
+
       // Not all ratings must exist, so check
       // Though it is expected that post-cull groups have at least one rating
-      if (rtMatchBins[j].size()) {
-        rating += rtBestMatches[j].rating;
+      if (!rtMatchBins[j].size()) {
+        continue;
+      }
+
+      // Cull groups that do not satisfy the (shapes / group size) ratio thresh
+      if (static_cast<double>(rtMatchBins[j].size()) /
+              static_cast<double>(db.groups[g].shapeIndices.size()) <
+          groupTh.minimumShapeGroupRatio) {
+        rating = 0;
+        break;
+      }
+
+      rating += rtBestMatches[j].rating;
+
+      // Do final average
+      if (k == db.groups[g].shapeIndices.size() - 1) {
+        rating /= db.groups[g].shapeIndices.size();
       }
     }
-    rating /= db.groups[g].shapeIndices.size();
     groupRatings.push_back(rating);
   }
 
@@ -277,7 +444,7 @@ std::vector<ShapeGroupMatch> matchRealtimeContours(
     }
   }
 
-  // Build output group list
+  // Build output group (single) list
   std::vector<ShapeGroupMatch> outGroups;
   if (bestGroupIdx != -1 && bestGroupRating > groupTh.minimumRating) {
     ShapeGroupMatch tempGroup;
@@ -298,17 +465,6 @@ std::vector<ShapeGroupMatch> matchRealtimeContours(
     tempGroup.distance = approximateGroupDistance(0, cameraInfo);
     outGroups.emplace_back(tempGroup);
   }
-
-  // Deallocate
-  gpuErrorCheck(cudaFree(dev_areaDifferences));
-  gpuErrorCheck(cudaFree(dev_colorDifferences));
-  delete[] areaDifferences;
-  delete[] colorDifferences;
-
-  // Stats
-  // ROS_INFO("------------------");
-  // ROS_INFO("Matches With Grid Cull: %i", debugPreMatch);
-  // ROS_INFO("Matches With Fine Cull: %i", debugMatches);
 
   // Return
   return outGroups;

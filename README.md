@@ -1,52 +1,17 @@
-# Vision
+# Shape Matcher
 
-This module encompasses all of ARVP's image processing algorithms as well as a
-variety of vision-related tools. This includes:
+This is a subset of [ARVP's](arvp.org) computer vision subsystem from 2019. It contains a classical computer vision algorithm that detects shapes using contrast properties of underwater images and shape priors.
 
-* General
-  * [Mock Camera](#mock-front-camera)
-  * [Detector Handler](#detector-handler)
-* Computer Vision
-  * [OpenCV](#opencv--cuda)
-  * [Superpixel Image Segmentation (gSLICr)](#superpixel-image-segmentation-gslicr)
-  * [Automatic Filter](#automatic-filter)
-  * [Qualification Detectors](#qualification-detectors)
-  * [Shape Database Creator](#shape-db-creator)
-  * [Shape Matcher](#shape-matcher)
-* Deep Learning
-  * [YOLO Detector](#yolo-detector)
+![Path detector showing superpixels](path-detector-with-superpixels.png)
+![Shape matcher working on path and roulette props](src/examples/combinedMatcherVid.mp4)
 
-## Mock Camera
-
-* Example usage: <br/> `roslaunch au_vision mock_camera.launch input:=absolute-path-to-media-file.mp4 fps:=30 camera:=bottom`
-* Both arguments are optional. Defaults are detailed below.
-
-Args:
-* input:=**absolute path-to-video-file.mp4**
-  * File path of input media file (can be either video or image)
-  * Default: Webcam or USB camera
-* fps:=**120**
-  * Frames per second of media stream
-  * Default: 60
-* camera:=**bottom**
-  * Camera topic to publish to
-  * Default: front
-
-Publishes:
-* /front/camera/image_raw
-* /bottom/camera/image_raw
-
-## Detector Handler
-
-* Example usage: <br/> `roslaunch au_vision detector_handler.launch debug:="true"`
-
-Ommit the 'debug:="true"' parameter to disable debugging related calculations (possibly gaining a performance boost)
-
-The detector handler is a unified tool for launching individual detectors and switching between them.
-Detectors do not have individual launch files, so must be used through the detector handler.
-For testing, the rqt plugin "ARVP/Tracker GUI" can be used to turn detectors on / off once the detector handler has been launched.
-
-The /track client accepts a [Tracking.srv](https://github.com/arvpUofA/au_everything/blob/master/catkin_ws/src/au_core/srv/Tracking.srv) service message.
+Index
+* [OpenCV](#opencv--cuda)
+* [Superpixel Image Segmentation (gSLICr)](#superpixel-image-segmentation-gslicr)
+* [Automatic Filter](#automatic-filter)
+* [Qualification Detectors](#qualification-detectors)
+* [Shape Database Creator](#shape-db-creator)
+* [Shape Matcher](#shape-matcher)
 
 ## OpenCV / CUDA
 
@@ -386,17 +351,3 @@ See the documentation on "Debugging / Profiling" to learn how to profile this sy
 The slowest part of the system seems to be the auto filter. Try reducing its bins to trade off accuracy for speed if that’s an issue.
 
 Note that performance is also based on the amount of concurrent GPU kernels that can be run. This is limited by VRAM as set by a constant in shape_analysis_detector_common.cpp.
-
-### [Yolo Detector](https://docs.google.com/document/d/1wjVm6NK-jGZnbUmf0oDLLqZvHAWokGWwuJRffyF8SR8/edit#heading=h.mltmcm8ko3m0)
-
-The YOLO detector will automatically be compile with CUDA support if it exists. Otherwise it will be CPU only.
-
-Setting up the yolo_detector:
-
-1. Check the [Models](https://docs.google.com/spreadsheets/d/13j7JwWDRWmts52fMM-UY3x0jxDNN06LE9WNsFbvPqdI/edit#gid=1954699358) google sheet for the available models. 
-1. Download the desired weight file and corresponding cfg file from the [2019]
- folder
-1. Place the .weights file in au_vision. Path to weights folder
-1. If the cfg file does not already exist in the cfg folder, copy it over. Path the cfg folder
-Modify yolo.yaml temporarily to use your desired weights and cfg file.
-

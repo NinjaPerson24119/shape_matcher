@@ -3,7 +3,7 @@
 This is a subset of [ARVP's](arvp.org) computer vision subsystem from 2019. It contains a classical computer vision algorithm that detects shapes using contrast properties of underwater images and shape priors.
 
 ![Path detector showing superpixels](path-detector-with-superpixels.png)
-![Shape matcher working on path and roulette props](src/examples/combinedMatcherVid.mp4)
+![Shape matcher working on path and roulette props](combinedMatcherVid.mp4)
 
 Index
 * [OpenCV](#opencv--cuda)
